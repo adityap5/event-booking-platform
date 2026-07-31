@@ -1,0 +1,20 @@
+{
+  "name": "@event-booking/worker",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc --noEmit",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@event-booking/shared": "workspace:*",
+    "@event-booking/trpc": "workspace:*",
+    "@event-booking/permissions": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.0.0",
+    "wrangler": "^4.0.0",
+    "typescript": "^5.8.0"
+  }
+}

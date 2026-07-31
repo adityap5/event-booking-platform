@@ -1,0 +1,7 @@
+{
+  // https://developers.cloudflare.com/workers/wrangler/configuration/
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "event-booking-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-28"
+}

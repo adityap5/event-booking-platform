@@ -1,0 +1,22 @@
+{
+  "name": "@event-booking/trpc",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@event-booking/shared": "workspace:*",
+    "@trpc/server": "^11.1.0",
+    "@trpc/client": "^11.1.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
+}

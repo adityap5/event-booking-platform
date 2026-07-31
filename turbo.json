@@ -1,0 +1,40 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
+    },
+    "@event-booking/shared#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@event-booking/trpc#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@event-booking/permissions#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@event-booking/worker#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "dev": {
+      "dependsOn": ["^build"],
+      "persistent": true,
+      "cache": false
+    },
+    "deploy": {
+      "dependsOn": ["build"],
+      "cache": false
+    },
+    "lint": {
+      "dependsOn": ["^build"]
+    },
+    "clean": {
+      "cache": false
+    }
+  }
+}
