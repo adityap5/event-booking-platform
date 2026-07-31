@@ -4,13 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "opennextjs-cloudflare build",
-    "dev": "next dev",
-    "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
-    "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
-    "start": "next start",
-    "lint": "next lint"
-  },
+  "build": "next build",
+  "cf:build": "opennextjs-cloudflare build",
+  "dev": "next dev",
+  "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
+  "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
+  "start": "next start",
+  "lint": "next lint"
+},
   "dependencies": {
     "@event-booking/shared": "workspace:*",
     "@event-booking/trpc": "workspace:*",
