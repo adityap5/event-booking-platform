@@ -4,14 +4,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "next build",
+    "build": "opennextjs-cloudflare build",
     "dev": "next dev",
+    "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
+    "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
     "start": "next start",
     "lint": "next lint"
   },
   "dependencies": {
     "@event-booking/shared": "workspace:*",
     "@event-booking/trpc": "workspace:*",
+    "@opennextjs/cloudflare": "^1.0.0",
     "next": "^15.3.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
@@ -20,6 +23,7 @@
     "@types/node": "20.17.6",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
-    "typescript": "^5.8.0"
+    "typescript": "^5.8.0",
+    "wrangler": "^4.0.0"
   }
 }

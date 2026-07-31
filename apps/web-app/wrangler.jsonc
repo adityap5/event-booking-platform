@@ -1,0 +1,12 @@
+{
+  // OpenNext for Cloudflare — deploys Next.js to Workers
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "event-booking-web",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2026-07-31",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  }
+}
