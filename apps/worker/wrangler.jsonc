@@ -3,5 +3,47 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "event-booking-worker",
   "main": "src/index.ts",
-  "compatibility_date": "2026-07-28"
+  "compatibility_date": "2026-07-31",
+
+  // ── Storage bindings ──────────────────────────────────────────────
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "event-booking-db",
+      "database_id": "05383818-d198-4e5c-a161-cde5e7dca296"
+    }
+  ],
+
+  "kv_namespaces": [
+    {
+      "binding": "EVENT_CACHE",
+      "id": "9d9eb3a5c47c4ebcaf9e473674e7e25b"
+    }
+  ],
+
+  "r2_buckets": [
+    {
+      "binding": "EVENT_COVERS",
+      "bucket_name": "event-covers"
+    }
+  ],
+
+  // ── Durable Objects ───────────────────────────────────────────────
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SEAT_LEDGER",
+        "class_name": "SeatLedger"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["SeatLedger"]
+    }
+  ]
 }

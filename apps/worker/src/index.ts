@@ -1,3 +1,5 @@
+export { SeatLedger } from "./seat-ledger.js";
+
 export default {
   async fetch(): Promise<Response> {
     return new Response("ok");
