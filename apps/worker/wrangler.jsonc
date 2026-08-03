@@ -3,7 +3,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "event-booking-worker",
   "main": "src/index.ts",
-  "compatibility_date": "2026-07-31",
+ "compatibility_date": "2026-07-29",
 
   // ── Storage bindings ──────────────────────────────────────────────
 

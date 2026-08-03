@@ -8,13 +8,14 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
+    "@event-booking/permissions": "workspace:*",
     "@event-booking/shared": "workspace:*",
     "@event-booking/trpc": "workspace:*",
-    "@event-booking/permissions": "workspace:*"
+    "@trpc/server": "^11.18.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.0.0",
-    "wrangler": "^4.0.0",
-    "typescript": "^5.8.0"
+    "typescript": "^5.8.0",
+    "wrangler": "^4.0.0"
   }
 }
