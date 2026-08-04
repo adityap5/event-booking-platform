@@ -8,7 +8,7 @@ export type Env = {
   CLERK_JWT_KEY: string;
 };
 
-const ALLOWED_ORIGIN = 'http://localhost:3000';
+const ALLOWED_ORIGIN = 'https://event-booking-web.aditya29.workers.dev';
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {

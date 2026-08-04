@@ -1,12 +1,36 @@
-import { clerkMiddleware } from '@clerk/nextjs/server';
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
 
-export default clerkMiddleware();
+export function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+
+  // Define public routes
+  const isPublicPath = 
+    pathname === '/' || 
+    pathname.startsWith('/sign-in') || 
+    pathname.startsWith('/sign-up') ||
+    pathname.startsWith('/api/') || 
+    pathname.startsWith('/trpc/');
+
+  if (isPublicPath) {
+    return NextResponse.next();
+  }
+
+  // Check for Clerk's session cookie
+  const sessionCookie = request.cookies.get('__session');
+
+  // If no session cookie on a protected route, redirect to sign-in
+  if (!sessionCookie) {
+    const signInUrl = new URL('/sign-in', request.url);
+    signInUrl.searchParams.set('redirect_url', pathname);
+    return NextResponse.redirect(signInUrl);
+  }
+
+  return NextResponse.next();
+}
 
 export const config = {
   matcher: [
-    // Skip Next.js internals and all static files, unless found in search params
-    '/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)',
-    // Always run for API routes
-    '/(api|trpc)(.*)',
+    '/((?!_next/static|_next/image|favicon.ico|.*\\.[\\w]+$).*)',
   ],
 };

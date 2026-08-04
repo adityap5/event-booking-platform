@@ -4,8 +4,7 @@ import {
   OrganizationSwitcher,
   UserButton,
 } from '@clerk/nextjs';
-import { getAuth } from '@clerk/nextjs/server';
-import { GetServerSideProps } from 'next';
+import { RequireAuth } from '../components/RequireAuth';
 import { useState } from 'react';
 import Link from 'next/link';
 import { createAuthenticatedTRPCClient } from '../lib/trpc';
@@ -37,7 +36,8 @@ export default function DashboardPage() {
   };
 
   return (
-    <div style={{ padding: '2rem' }}>
+    <RequireAuth>
+      <div style={{ padding: '2rem' }}>
       <header
         style={{
           display: 'flex',
@@ -114,21 +114,7 @@ export default function DashboardPage() {
           </pre>
         )}
       </div>
-    </div>
+      </div>
+    </RequireAuth>
   );
 }
-
-export const getServerSideProps: GetServerSideProps = async (ctx) => {
-  const { userId } = getAuth(ctx.req);
-
-  if (!userId) {
-    return {
-      redirect: {
-        destination: '/sign-in?redirect_url=' + encodeURIComponent(ctx.resolvedUrl),
-        permanent: false,
-      },
-    };
-  }
-
-  return { props: {} };
-};

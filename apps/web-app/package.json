@@ -13,15 +13,15 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@clerk/nextjs": "^7.6.4",
+    "@clerk/nextjs": "^6.10.0",
     "@event-booking/shared": "workspace:*",
     "@event-booking/trpc": "workspace:*",
-    "@opennextjs/cloudflare": "^1.0.0",
+    "@opennextjs/cloudflare": "^1.15.0",
     "@trpc/client": "^11.18.0",
     "@trpc/server": "^11.18.0",
     "next": "^15.3.0",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react": "19.2.1",
+    "react-dom": "19.2.1"
   },
   "devDependencies": {
     "@event-booking/worker": "workspace:*",
@@ -29,6 +29,6 @@
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "typescript": "^5.8.0",
-    "wrangler": "^4.0.0"
+    "wrangler": "^4.65.0"
   }
 }

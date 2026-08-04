@@ -1,6 +1,5 @@
 import { CreateOrganization, useOrganization } from '@clerk/nextjs';
-import { getAuth } from '@clerk/nextjs/server';
-import { GetServerSideProps } from 'next';
+import { RequireAuth } from '../../components/RequireAuth';
 import Head from 'next/head';
 import { useRouter } from 'next/router';
 import { useEffect } from 'react';
@@ -35,7 +34,8 @@ export default function BecomeOrganiserPage() {
   }
 
   return (
-    <div className={styles.page}>
+    <RequireAuth>
+      <div className={styles.page}>
       <Head>
         <title>Become an Organiser | Event Booking</title>
       </Head>
@@ -52,21 +52,7 @@ export default function BecomeOrganiserPage() {
         afterCreateOrganizationUrl="/dashboard"
         skipInvitationScreen={true}
       />
-    </div>
+      </div>
+    </RequireAuth>
   );
 }
-
-export const getServerSideProps: GetServerSideProps = async (ctx) => {
-  const { userId } = getAuth(ctx.req);
-
-  if (!userId) {
-    return {
-      redirect: {
-        destination: '/sign-in?redirect_url=' + encodeURIComponent(ctx.resolvedUrl),
-        permanent: false,
-      },
-    };
-  }
-
-  return { props: {} };
-};
