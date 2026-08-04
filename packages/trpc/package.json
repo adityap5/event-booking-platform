@@ -12,9 +12,11 @@
   },
   "dependencies": {
     "@clerk/backend": "^3.15.0",
+    "@event-booking/permissions": "workspace:*",
     "@event-booking/shared": "workspace:*",
     "@trpc/client": "^11.1.0",
     "@trpc/server": "^11.1.0",
+    "drizzle-orm": "^0.45.2",
     "zod": "^3.24.0"
   },
   "devDependencies": {

@@ -1,5 +1,6 @@
 import { initTRPC, TRPCError } from '@trpc/server';
 import type { Context } from './context.js';
+import { authorizeOrganiserAccess } from '@event-booking/permissions';
 
 const t = initTRPC.context<Context>().create();
 
@@ -20,3 +21,33 @@ const isAuthed = t.middleware(({ next, ctx }) => {
 });
 
 export const protectedProcedure = t.procedure.use(isAuthed);
+
+/**
+ * Middleware factory that enforces organiser access to a specific resource.
+ * MUST be chained AFTER .input() in the procedure builder so that `input` is parsed.
+ *
+ * @param getResourceOrgId A callback to extract or fetch the target org ID for the current request.
+ */
+export const enforceOrganiserAccess = <TInput>(
+  getResourceOrgId: (opts: { input: TInput; ctx: Context }) => Promise<string | null> | string | null
+) => {
+  return t.middleware(async ({ next, ctx, input }) => {
+    // 1. Fetch or extract the target resource's organisation ID
+    // Because this middleware is .use()'d after .input(), `input` here is fully parsed and typed!
+    console.log("Middleware input:", input);
+    
+    const resourceOrgId = await getResourceOrgId({ input: input as TInput, ctx });
+
+    if (!resourceOrgId) {
+      throw new TRPCError({
+        code: 'NOT_FOUND',
+        message: 'Resource not found',
+      });
+    }
+
+    // 2. Delegate to the shared permissions package to verify access
+    authorizeOrganiserAccess(ctx, resourceOrgId);
+
+    return next({ ctx });
+  });
+};

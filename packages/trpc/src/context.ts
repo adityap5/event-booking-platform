@@ -1,6 +1,8 @@
 import { verifyToken } from '@clerk/backend';
 import { TRPCError } from '@trpc/server';
 import type { FetchCreateContextFnOptions } from '@trpc/server/adapters/fetch';
+import type { DrizzleD1Database } from 'drizzle-orm/d1';
+import * as schema from '@event-booking/shared';
 
 interface CreateContextOptions extends FetchCreateContextFnOptions {
   /**
@@ -14,10 +16,11 @@ interface CreateContextOptions extends FetchCreateContextFnOptions {
    * Prevents CSRF-style replay attacks where a token from another application is used here.
    */
   authorizedParties: string[];
+  db: DrizzleD1Database<typeof schema>;
 }
 
 export async function createContext(opts: CreateContextOptions) {
-  const { req, clerkJwtKey, authorizedParties } = opts;
+  const { req, clerkJwtKey, authorizedParties, db } = opts;
   
   // 1. Read the Authorization header from the incoming request
   const authHeader = req.headers.get('Authorization');
@@ -64,6 +67,7 @@ export async function createContext(opts: CreateContextOptions) {
       // If the user has no active organization, the 'o' claim is completely omitted.
       orgId: claims.o?.id,
       role: claims.o?.rol,
+      db,
     };
   } catch (error) {
     // Log the actual error internally for debugging

@@ -277,6 +277,12 @@ importers:
       '@trpc/server':
         specifier: ^11.18.0
         version: 11.18.0(typescript@5.8.2)
+      drizzle-orm:
+        specifier: ^0.45.2
+        version: 0.45.2(@cloudflare/workers-types@4.20260702.1)
+      zod:
+        specifier: ^3.24.0
+        version: 3.24.0
     devDependencies:
       '@cloudflare/workers-types':
         specifier: ^4.0.0
@@ -293,6 +299,9 @@ importers:
       '@event-booking/shared':
         specifier: workspace:*
         version: link:../shared
+      '@trpc/server':
+        specifier: ^11.18.0
+        version: 11.18.0(typescript@5.8.2)
     devDependencies:
       typescript:
         specifier: ^5.8.0
@@ -316,6 +325,9 @@ importers:
       '@clerk/backend':
         specifier: ^3.15.0
         version: 3.15.0(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@event-booking/permissions':
+        specifier: workspace:*
+        version: link:../permissions
       '@event-booking/shared':
         specifier: workspace:*
         version: link:../shared
@@ -325,6 +337,9 @@ importers:
       '@trpc/server':
         specifier: ^11.1.0
         version: 11.18.0(typescript@5.8.2)
+      drizzle-orm:
+        specifier: ^0.45.2
+        version: 0.45.2(@cloudflare/workers-types@4.20260702.1)
       zod:
         specifier: ^3.24.0
         version: 3.24.0

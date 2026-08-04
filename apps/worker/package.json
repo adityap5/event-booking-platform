@@ -11,7 +11,9 @@
     "@event-booking/permissions": "workspace:*",
     "@event-booking/shared": "workspace:*",
     "@event-booking/trpc": "workspace:*",
-    "@trpc/server": "^11.18.0"
+    "@trpc/server": "^11.18.0",
+    "drizzle-orm": "^0.45.2",
+    "zod": "^3.24.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.0.0",

@@ -5,4 +5,36 @@
  * Do not import any Node.js-only or browser-only APIs.
  */
 
-export {};
+import { TRPCError } from '@trpc/server';
+
+export interface AuthContext {
+  userId: string;
+  orgId?: string | null;
+  role?: string | null;
+}
+
+/**
+ * Reusable authorization helper that compares the authenticated context
+ * against a resource's known organisation ID.
+ */
+export function authorizeOrganiserAccess(ctx: AuthContext, resourceOrgId: string) {
+  // If the user has no orgId (e.g. they are just a standard attendee),
+  // they shouldn't even be accessing organiser resources. We handle this as a standard 403.
+  if (!ctx.orgId) {
+    throw new TRPCError({
+      code: 'FORBIDDEN',
+      message: 'You must be an organiser to access this resource.',
+    });
+  }
+
+  // If they have an orgId, it must explicitly match the resource's organisationId.
+  if (ctx.orgId !== resourceOrgId) {
+    throw new TRPCError({
+      code: 'FORBIDDEN',
+      message: 'You do not have permission to modify or view this organisation\'s resources.',
+    });
+  }
+
+  // Optional: add more checks for specific roles (e.g. 'admin' vs 'member') here if needed
+  return true;
+}

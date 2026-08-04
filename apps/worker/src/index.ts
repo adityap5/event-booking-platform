@@ -1,11 +1,14 @@
 import { fetchRequestHandler } from '@trpc/server/adapters/fetch';
 import { createContext } from '@event-booking/trpc';
 import { appRouter } from './router.js';
+import { drizzle } from 'drizzle-orm/d1';
+import * as schema from '@event-booking/shared';
 
 export { SeatLedger } from "./seat-ledger.js";
 
 export type Env = {
   CLERK_JWT_KEY: string;
+  DB: D1Database;
 };
 
 const ALLOWED_ORIGIN = 'https://event-booking-web.aditya29.workers.dev';
@@ -33,6 +36,7 @@ export default {
           ...opts,
           clerkJwtKey: env.CLERK_JWT_KEY,
           authorizedParties: [ALLOWED_ORIGIN, 'http://localhost:3000'],
+          db: drizzle(env.DB, { schema }),
         }),
     });
 
