@@ -5,12 +5,14 @@ import { drizzle } from 'drizzle-orm/d1';
 import * as schema from '@event-booking/shared';
 import { Webhook } from 'svix';
 
-export { SeatLedger } from "./seat-ledger.js";
+import { SeatLedger } from "./seat-ledger.js";
+export { SeatLedger };
 
 export type Env = {
   CLERK_JWT_KEY: string;
   CLERK_WEBHOOK_SECRET: string;
   DB: D1Database;
+  SEAT_LEDGER: DurableObjectNamespace<SeatLedger>;
 };
 
 const ALLOWED_ORIGIN = 'https://event-booking-web.aditya29.workers.dev';
@@ -96,6 +98,7 @@ export default {
           clerkJwtKey: env.CLERK_JWT_KEY,
           authorizedParties: [ALLOWED_ORIGIN, 'http://localhost:3000'],
           db: drizzle(env.DB, { schema }),
+          env,
         }),
     });
 

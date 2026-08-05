@@ -17,26 +17,33 @@ interface CreateContextOptions extends FetchCreateContextFnOptions {
    */
   authorizedParties: string[];
   db: DrizzleD1Database<typeof schema>;
+  env: unknown;
 }
 
 export async function createContext(opts: CreateContextOptions) {
-  const { req, clerkJwtKey, authorizedParties, db } = opts;
+  const { req, clerkJwtKey, authorizedParties, db, env } = opts;
   
   // 1. Read the Authorization header from the incoming request
   const authHeader = req.headers.get('Authorization');
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    throw new TRPCError({
-      code: 'UNAUTHORIZED',
-      message: 'Missing or malformed Authorization header',
-    });
+    return {
+      userId: undefined,
+      orgId: undefined,
+      role: undefined,
+      db,
+      env,
+    };
   }
 
   const token = authHeader.replace('Bearer ', '');
   if (!token) {
-    throw new TRPCError({
-      code: 'UNAUTHORIZED',
-      message: 'Missing token in Authorization header',
-    });
+    return {
+      userId: undefined,
+      orgId: undefined,
+      role: undefined,
+      db,
+      env,
+    };
   }
 
   try {
@@ -68,6 +75,7 @@ export async function createContext(opts: CreateContextOptions) {
       orgId: claims.o?.id,
       role: claims.o?.rol,
       db,
+      env,
     };
   } catch (error) {
     // Log the actual error internally for debugging

@@ -34,7 +34,6 @@ export const enforceOrganiserAccess = <TInput>(
   return t.middleware(async ({ next, ctx, input }) => {
     // 1. Fetch or extract the target resource's organisation ID
     // Because this middleware is .use()'d after .input(), `input` here is fully parsed and typed!
-    console.log("Middleware input:", input);
     
     const resourceOrgId = await getResourceOrgId({ input: input as TInput, ctx });
 
@@ -45,8 +44,17 @@ export const enforceOrganiserAccess = <TInput>(
       });
     }
 
+    if (!ctx.userId) {
+      throw new TRPCError({
+        code: 'UNAUTHORIZED',
+      });
+    }
+
     // 2. Delegate to the shared permissions package to verify access
-    authorizeOrganiserAccess(ctx, resourceOrgId);
+    authorizeOrganiserAccess(
+      { userId: ctx.userId, orgId: ctx.orgId, role: ctx.role }, 
+      resourceOrgId
+    );
 
     return next({ ctx });
   });
