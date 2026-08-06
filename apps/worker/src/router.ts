@@ -13,6 +13,8 @@ interface WorkerEnv {
       getAvailableSeats: () => Promise<number | null>;
       initialize: (seats: number) => Promise<void>;
       reserveSeat: (userId: string, seats: number) => Promise<{ reservationId: string; expiresAt: number }>;
+      confirmSeat: (holdId: string) => Promise<{ userId: string; seatCount: number }>;
+      releaseSeat: (holdId: string) => Promise<void>;
     };
   };
 }
@@ -103,6 +105,83 @@ export const appRouter = router({
       } catch (err: any) {
         throw new TRPCError({ code: 'BAD_REQUEST', message: err.message });
       }
+    }),
+
+  ensureAttendee: protectedProcedure.mutation(async ({ ctx }) => {
+    const db = ctx.db;
+    const [attendee] = await db.select().from(schema.attendees).where(eq(schema.attendees.userId, ctx.userId));
+    if (attendee) {
+      return attendee;
+    }
+    
+    try {
+      const [newAttendee] = await db.insert(schema.attendees).values({
+        id: crypto.randomUUID(),
+        userId: ctx.userId,
+        email: '',
+        name: 'Attendee',
+      }).returning();
+      return newAttendee;
+    } catch (err: any) {
+      const [existingAttendee] = await db.select().from(schema.attendees).where(eq(schema.attendees.userId, ctx.userId));
+      if (existingAttendee) {
+        return existingAttendee;
+      }
+      throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: err.message });
+    }
+  }),
+
+  confirmBooking: workerProcedure
+    .input(z.object({ 
+      holdId: z.string().uuid(), 
+      eventId: z.string(),
+      stripePaymentIntentId: z.string().optional()
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const [attendee] = await ctx.db.select().from(schema.attendees).where(eq(schema.attendees.userId, ctx.userId));
+      if (!attendee) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Attendee profile not found. Call ensureAttendee first.' });
+      }
+
+      const id = ctx.env.SEAT_LEDGER.idFromName(input.eventId);
+      const stub = ctx.env.SEAT_LEDGER.get(id);
+
+      let confirmResult;
+      try {
+        confirmResult = await stub.confirmSeat(input.holdId);
+      } catch (err: any) {
+        if (err.message === 'HOLD_NOT_FOUND') throw new TRPCError({ code: 'NOT_FOUND', message: err.message });
+        if (err.message === 'HOLD_ALREADY_USED') throw new TRPCError({ code: 'CONFLICT', message: err.message });
+        if (err.message === 'HOLD_EXPIRED') throw new TRPCError({ code: 'PRECONDITION_FAILED', message: err.message });
+        throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: err.message });
+      }
+
+      const [booking] = await ctx.db.insert(schema.bookings).values({
+        id: crypto.randomUUID(),
+        eventId: input.eventId,
+        attendeeId: attendee.id,
+        status: 'confirmed',
+        seatCount: confirmResult.seatCount,
+        stripePaymentIntentId: input.stripePaymentIntentId ?? null,
+      }).returning();
+
+      return booking;
+    }),
+
+  releaseBooking: workerProcedure
+    .input(z.object({ 
+      holdId: z.string().uuid(), 
+      eventId: z.string() 
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const id = ctx.env.SEAT_LEDGER.idFromName(input.eventId);
+      const stub = ctx.env.SEAT_LEDGER.get(id);
+
+      await stub.releaseSeat(input.holdId);
+
+      // TODO Day 6: add holdId column to bookings table so we can cancel the D1 row here
+
+      return { released: true };
     }),
 
   checkOrgSync: protectedProcedure.query(async ({ ctx }) => {
