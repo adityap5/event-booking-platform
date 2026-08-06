@@ -31,6 +31,22 @@ export class SeatLedger extends DurableObject {
     `);
   }
 
+  private logEvent(event: {
+    type: 'RESERVED' | 'CONFIRMED' | 'RELEASED' | 'EXPIRED' | 'ALREADY_USED' | 'NOT_FOUND' | 'SOLD_OUT'
+    holdId: string
+    eventId?: string
+    userId?: string
+    seatCount?: number
+    availableSeats?: number
+    reason?: string
+  }): void {
+    try {
+      console.log(JSON.stringify({ ts: Date.now(), ...event }));
+    } catch {
+      // Never crash the DO due to logging failure
+    }
+  }
+
   initialize(totalSeats: number) {
     const rows = this.ctx.storage.sql.exec("SELECT initialized FROM event_state WHERE id = 1").toArray();
     if (rows.length > 0 && rows[0]!.initialized === 1) {
@@ -50,7 +66,7 @@ export class SeatLedger extends DurableObject {
     }
     const totalSeats = state[0]!.total_seats as number;
 
-    const used = this.ctx.storage.sql.exec("SELECT SUM(seat_count) as used_seats FROM reservations WHERE status != 'cancelled'").toArray();
+    const used = this.ctx.storage.sql.exec("SELECT SUM(seat_count) as used_seats FROM reservations WHERE status = 'pending' OR status = 'confirmed'").toArray();
     const usedSeats = (used[0]!.used_seats as number) || 0;
 
     return totalSeats - usedSeats;
@@ -70,12 +86,13 @@ export class SeatLedger extends DurableObject {
     }
     const totalSeats = state[0]!.total_seats as number;
 
-    const used = this.ctx.storage.sql.exec("SELECT SUM(seat_count) as used_seats FROM reservations WHERE status != 'cancelled'").toArray();
+    const used = this.ctx.storage.sql.exec("SELECT SUM(seat_count) as used_seats FROM reservations WHERE status = 'pending' OR status = 'confirmed'").toArray();
     const usedSeats = (used[0]!.used_seats as number) || 0;
 
     const available = totalSeats - usedSeats;
 
     if (available < seatCount) {
+      this.logEvent({ type: 'SOLD_OUT', holdId: '', reason: `Only ${available} seats available` });
       throw new Error(`Only ${available} seats available`);
     }
 
@@ -90,6 +107,8 @@ export class SeatLedger extends DurableObject {
     // END SYNCHRONOUS BLOCK
     // =========================================================================
 
+    this.logEvent({ type: 'RESERVED', holdId: reservationId, userId, seatCount, availableSeats: available - seatCount });
+
     const currentAlarm = await this.ctx.storage.getAlarm();
     if (currentAlarm === null || expiresAt < currentAlarm) {
       await this.ctx.storage.setAlarm(expiresAt);
@@ -98,11 +117,59 @@ export class SeatLedger extends DurableObject {
     return { reservationId, expiresAt };
   }
 
+  async confirmSeat(holdId: string): Promise<{ userId: string; seatCount: number }> {
+    const holds = this.ctx.storage.sql.exec("SELECT user_id, seat_count, status, expires_at FROM reservations WHERE id = ?", holdId).toArray();
+    if (holds.length === 0) {
+      this.logEvent({ type: 'NOT_FOUND', holdId, reason: 'HOLD_NOT_FOUND' });
+      throw new Error('HOLD_NOT_FOUND');
+    }
+    
+    const hold = holds[0]!;
+    if (hold.status !== 'pending') {
+      this.logEvent({ type: 'ALREADY_USED', holdId, reason: 'HOLD_ALREADY_USED' });
+      throw new Error('HOLD_ALREADY_USED');
+    }
+    
+    if ((hold.expires_at as number) < Date.now()) {
+      this.logEvent({ type: 'EXPIRED', holdId, reason: 'HOLD_EXPIRED' });
+      throw new Error('HOLD_EXPIRED');
+    }
+    
+    this.ctx.storage.sql.exec("UPDATE reservations SET status = 'confirmed' WHERE id = ?", holdId);
+    this.logEvent({ type: 'CONFIRMED', holdId, userId: hold.user_id as string, seatCount: hold.seat_count as number });
+    
+    return {
+      userId: hold.user_id as string,
+      seatCount: hold.seat_count as number,
+      // Note: eventId is omitted here as it's not stored in the DO (DO is already 1:1 with an event)
+    };
+  }
+
+  async releaseSeat(holdId: string): Promise<void> {
+    const holds = this.ctx.storage.sql.exec("SELECT status, seat_count FROM reservations WHERE id = ?", holdId).toArray();
+    if (holds.length === 0) return; // Silent return if not found (idempotent)
+    
+    const status = holds[0]!.status;
+    if (status === 'confirmed') return; // Cannot release a confirmed booking
+    if (status === 'released') return;  // Already released — idempotent no-op
+    
+    if (status === 'pending') {
+      // By changing status to 'released', it automatically stops counting towards used_seats 
+      // in our dynamic SUM() queries for getAvailableSeats and reserveSeat.
+      // This achieves the identical idempotent availability increment you requested.
+      this.ctx.storage.sql.exec("UPDATE reservations SET status = 'released' WHERE id = ?", holdId);
+      this.logEvent({ type: 'RELEASED', holdId });
+    }
+  }
+
   async alarm() {
     const now = Date.now();
     
-    // Clean up expired
-    this.ctx.storage.sql.exec("DELETE FROM reservations WHERE status = 'pending' AND expires_at <= ?", now);
+    const expired = this.ctx.storage.sql.exec("SELECT id FROM reservations WHERE status = 'pending' AND expires_at <= ?", now).toArray();
+    for (const row of expired) {
+      this.logEvent({ type: 'EXPIRED', holdId: row.id as string, reason: 'alarm_expiry' });
+      await this.releaseSeat(row.id as string);
+    }
 
     // Find the next upcoming expiration
     const next = this.ctx.storage.sql.exec("SELECT MIN(expires_at) as next_expiry FROM reservations WHERE status = 'pending'").toArray();
