@@ -11,6 +11,8 @@ export { SeatLedger };
 export type Env = {
   CLERK_JWT_KEY: string;
   CLERK_WEBHOOK_SECRET: string;
+  STRIPE_SECRET_KEY: string;
+  STRIPE_WEBHOOK_SECRET: string;
   DB: D1Database;
   SEAT_LEDGER: DurableObjectNamespace<SeatLedger>;
 };
