@@ -78,6 +78,7 @@ export const bookings = sqliteTable(
     status: text('status', { enum: ['pending', 'confirmed', 'cancelled'] })
       .notNull()
       .default('pending'),
+    holdId: text('hold_id'),  // nullable — pre-existing bookings have no holdId
     seatCount: integer('seat_count').notNull(),
     stripePaymentIntentId: text('stripe_payment_intent_id'),
     createdAt: integer('created_at', { mode: 'timestamp' })

@@ -162,6 +162,7 @@ export const appRouter = router({
         attendeeId: attendee.id,
         status: 'confirmed',
         seatCount: confirmResult.seatCount,
+        holdId: input.holdId,
         stripePaymentIntentId: input.stripePaymentIntentId ?? null,
       }).returning();
 
@@ -179,7 +180,11 @@ export const appRouter = router({
 
       await stub.releaseSeat(input.holdId);
 
-      // TODO Day 6: add holdId column to bookings table so we can cancel the D1 row here
+     // Cancel the D1 booking row if it exists
+        await ctx.db
+        .update(schema.bookings)
+        .set({ status: 'cancelled' })
+        .where(eq(schema.bookings.holdId, input.holdId));
 
       return { released: true };
     }),
