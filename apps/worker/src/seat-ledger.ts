@@ -1,12 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./index.js";
 
-/**
- * SeatLedger — Durable Object for per-event seat reservation.
- *
- * Each instance tracks seat holds and confirmed bookings for a single event,
- * providing strong consistency guarantees within a single coordination point.
- */
 export class SeatLedger extends DurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -27,6 +21,16 @@ export class SeatLedger extends DurableObject {
         seat_count INTEGER NOT NULL,
         expires_at INTEGER NOT NULL,
         status TEXT NOT NULL
+      );
+    `);
+
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS socket_tickets (
+        ticket TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        org_id TEXT,
+        event_id TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
       );
     `);
   }
@@ -137,7 +141,9 @@ export class SeatLedger extends DurableObject {
     
     this.ctx.storage.sql.exec("UPDATE reservations SET status = 'confirmed' WHERE id = ?", holdId);
     this.logEvent({ type: 'CONFIRMED', holdId, userId: hold.user_id as string, seatCount: hold.seat_count as number });
-    
+
+    this.broadcastSeatCount();
+
     return {
       userId: hold.user_id as string,
       seatCount: hold.seat_count as number,
@@ -159,6 +165,7 @@ export class SeatLedger extends DurableObject {
       // This achieves the identical idempotent availability increment you requested.
       this.ctx.storage.sql.exec("UPDATE reservations SET status = 'released' WHERE id = ?", holdId);
       this.logEvent({ type: 'RELEASED', holdId });
+      this.broadcastSeatCount();
     }
   }
 
@@ -178,5 +185,125 @@ export class SeatLedger extends DurableObject {
     if (nextExpiry) {
       await this.ctx.storage.setAlarm(nextExpiry);
     }
+  }
+
+  mintTicket(userId: string, orgId: string | null, eventId: string): string {
+    const ticket = crypto.randomUUID();
+
+    // Clean up stale tickets before inserting to prevent unbounded growth
+    this.ctx.storage.sql.exec(
+      "DELETE FROM socket_tickets WHERE expires_at < ?",
+      Date.now()
+    );
+
+    this.ctx.storage.sql.exec(
+      "INSERT INTO socket_tickets (ticket, user_id, org_id, event_id, expires_at) VALUES (?, ?, ?, ?, ?)",
+      ticket, userId, orgId, eventId, Date.now() + 30_000
+    );
+
+    return ticket;
+  }
+
+  redeemTicket(ticket: string, eventId: string): { userId: string; orgId: string | null } {
+    const rows = this.ctx.storage.sql.exec(
+      "SELECT user_id, org_id, event_id, expires_at FROM socket_tickets WHERE ticket = ?",
+      ticket
+    ).toArray();
+
+    if (rows.length === 0) {
+      throw new Error('TICKET_NOT_FOUND');
+    }
+
+    const row = rows[0]!;
+
+    if ((row.expires_at as number) < Date.now()) {
+      this.ctx.storage.sql.exec(
+        "DELETE FROM socket_tickets WHERE ticket = ?",
+        ticket
+      );
+      throw new Error('TICKET_EXPIRED');
+    }
+
+    if ((row.event_id as string) !== eventId) {
+      throw new Error('TICKET_WRONG_EVENT');
+    }
+
+    // Single-use: delete before returning
+    this.ctx.storage.sql.exec(
+      "DELETE FROM socket_tickets WHERE ticket = ?",
+      ticket
+    );
+
+    return { userId: row.user_id as string, orgId: row.org_id as string | null };
+  }
+
+  private broadcastSeatCount(): void {
+    const available = this.getAvailableSeats() ?? 0;
+    const sockets = this.ctx.getWebSockets();
+    const message = JSON.stringify({ type: 'seat_count', available });
+    for (const ws of sockets) {
+      try {
+        ws.send(message);
+      } catch {
+        // Closed or errored socket — skip and continue broadcasting to others
+      }
+    }
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const ticket = url.searchParams.get('ticket');
+    const eventId = url.searchParams.get('eventId');
+
+    if (!ticket || !eventId) {
+      return new Response('Missing ticket or eventId', { status: 400 });
+    }
+
+    let identity: { userId: string; orgId: string | null };
+    try {
+      identity = this.redeemTicket(ticket, eventId);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '';
+      if (msg === 'TICKET_NOT_FOUND') return new Response('Invalid ticket', { status: 401 });
+      if (msg === 'TICKET_EXPIRED') return new Response('Ticket expired', { status: 401 });
+      if (msg === 'TICKET_WRONG_EVENT') return new Response('Invalid ticket', { status: 401 });
+      return new Response('Internal error', { status: 500 });
+    }
+
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
+
+    // Hibernation-safe accept — stores userId as attachment, survives DO sleep
+    this.ctx.acceptWebSocket(server, [identity.userId]);
+
+    // Push current seat count immediately so reconnecting clients sync without a roundtrip
+    const available = this.getAvailableSeats() ?? 0;
+    server.send(JSON.stringify({ type: 'seat_count', available }));
+
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
+    try {
+      const data = JSON.parse(typeof message === 'string' ? message : '') as { type?: string };
+
+      if (data.type === 'ping') {
+        ws.send(JSON.stringify({ type: 'pong' }));
+      }
+
+      // Identity always comes from the attachment set at accept time — never trusted from message payload
+      const [userId] = (ws as unknown as { attachment: [string] }).attachment;
+      void userId; // available for future per-user message handling
+    } catch {
+      // Malformed message — ignore silently, do not crash the DO
+    }
+  }
+
+  webSocketClose(_ws: WebSocket, code: number, reason: string): void {
+    console.log('WebSocket closed', { code, reason });
+  }
+
+  webSocketError(_ws: WebSocket, error: unknown): void {
+    console.error('WebSocket error:', error);
   }
 }
