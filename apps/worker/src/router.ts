@@ -18,6 +18,7 @@ interface WorkerEnv {
       reserveSeat: (userId: string, seats: number) => Promise<{ reservationId: string; expiresAt: number }>;
       confirmSeat: (holdId: string) => Promise<{ userId: string; seatCount: number }>;
       releaseSeat: (holdId: string) => Promise<void>;
+      mintTicket: (userId: string, orgId: string | null, eventId: string) => Promise<string>;
     };
   };
 }
@@ -247,6 +248,14 @@ export const appRouter = router({
     const [org] = await db.select().from(schema.organisations).where(eq(schema.organisations.id, ctx.orgId));
     return !!org;
   }),
+
+  createSocketTicket: workerProcedure
+    .input(z.object({ eventId: z.string() }))
+    .mutation(async ({ input, ctx }) => {
+      const stub = ctx.env.SEAT_LEDGER.get(ctx.env.SEAT_LEDGER.idFromName(input.eventId));
+      const ticket = await stub.mintTicket(ctx.userId, ctx.orgId ?? null, input.eventId);
+      return { ticket };
+    }),
 });
 
 export type AppRouter = typeof appRouter;
