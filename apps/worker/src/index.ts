@@ -183,6 +183,18 @@ export default {
       return new Response('', { status: 200 });
     }
 
+    // Handle WebSocket upgrades — forward to the SeatLedger DO for the event
+    if (url.pathname === '/ws' && request.headers.get('Upgrade') === 'websocket') {
+      const eventId = url.searchParams.get('eventId');
+      if (!eventId) {
+        return new Response('Missing eventId', { status: 400 });
+      }
+
+      const id = env.SEAT_LEDGER.idFromName(eventId);
+      const stub = env.SEAT_LEDGER.get(id) as DurableObjectStub;
+      return stub.fetch(request);
+    }
+
     // Handle CORS preflight requests for tRPC
     if (request.method === 'OPTIONS') {
       return new Response(null, {
