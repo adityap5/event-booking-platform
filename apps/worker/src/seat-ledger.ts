@@ -1,12 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./index.js";
 
-/**
- * SeatLedger — Durable Object for per-event seat reservation.
- *
- * Each instance tracks seat holds and confirmed bookings for a single event,
- * providing strong consistency guarantees within a single coordination point.
- */
 export class SeatLedger extends DurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -27,6 +21,16 @@ export class SeatLedger extends DurableObject {
         seat_count INTEGER NOT NULL,
         expires_at INTEGER NOT NULL,
         status TEXT NOT NULL
+      );
+    `);
+
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS socket_tickets (
+        ticket TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        org_id TEXT,
+        event_id TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
       );
     `);
   }
@@ -178,5 +182,55 @@ export class SeatLedger extends DurableObject {
     if (nextExpiry) {
       await this.ctx.storage.setAlarm(nextExpiry);
     }
+  }
+
+  mintTicket(userId: string, orgId: string | null, eventId: string): string {
+    const ticket = crypto.randomUUID();
+
+    // Clean up stale tickets before inserting to prevent unbounded growth
+    this.ctx.storage.sql.exec(
+      "DELETE FROM socket_tickets WHERE expires_at < ?",
+      Date.now()
+    );
+
+    this.ctx.storage.sql.exec(
+      "INSERT INTO socket_tickets (ticket, user_id, org_id, event_id, expires_at) VALUES (?, ?, ?, ?, ?)",
+      ticket, userId, orgId, eventId, Date.now() + 30_000
+    );
+
+    return ticket;
+  }
+
+  redeemTicket(ticket: string, eventId: string): { userId: string; orgId: string | null } {
+    const rows = this.ctx.storage.sql.exec(
+      "SELECT user_id, org_id, event_id, expires_at FROM socket_tickets WHERE ticket = ?",
+      ticket
+    ).toArray();
+
+    if (rows.length === 0) {
+      throw new Error('TICKET_NOT_FOUND');
+    }
+
+    const row = rows[0]!;
+
+    if ((row.expires_at as number) < Date.now()) {
+      this.ctx.storage.sql.exec(
+        "DELETE FROM socket_tickets WHERE ticket = ?",
+        ticket
+      );
+      throw new Error('TICKET_EXPIRED');
+    }
+
+    if ((row.event_id as string) !== eventId) {
+      throw new Error('TICKET_WRONG_EVENT');
+    }
+
+    // Single-use: delete before returning
+    this.ctx.storage.sql.exec(
+      "DELETE FROM socket_tickets WHERE ticket = ?",
+      ticket
+    );
+
+    return { userId: row.user_id as string, orgId: row.org_id as string | null };
   }
 }
