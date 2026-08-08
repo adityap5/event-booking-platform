@@ -3,10 +3,13 @@ import { z } from 'zod';
 import * as schema from '@event-booking/shared';
 import { events } from '@event-booking/shared';
 import { eq } from 'drizzle-orm';
+import Stripe from 'stripe';
 
 import { TRPCError } from '@trpc/server';
 
 interface WorkerEnv {
+  STRIPE_SECRET_KEY: string;
+  STRIPE_WEBHOOK_SECRET: string;  
   SEAT_LEDGER: {
     idFromName: (name: string) => any;
     get: (id: any) => {
@@ -162,6 +165,7 @@ export const appRouter = router({
         attendeeId: attendee.id,
         status: 'confirmed',
         seatCount: confirmResult.seatCount,
+        holdId: input.holdId,
         stripePaymentIntentId: input.stripePaymentIntentId ?? null,
       }).returning();
 
@@ -179,9 +183,62 @@ export const appRouter = router({
 
       await stub.releaseSeat(input.holdId);
 
-      // TODO Day 6: add holdId column to bookings table so we can cancel the D1 row here
+     // Cancel the D1 booking row if it exists
+        await ctx.db
+        .update(schema.bookings)
+        .set({ status: 'cancelled' })
+        .where(eq(schema.bookings.holdId, input.holdId));
 
       return { released: true };
+    }),
+
+  createCheckoutSession: workerProcedure
+    .input(z.object({
+      holdId: z.string().uuid(),
+      eventId: z.string(),
+      seatCount: z.number().min(1).max(10),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const [event] = await ctx.db
+        .select({ id: events.id, name: events.name, pricePerSeat: events.pricePerSeat })
+        .from(events)
+        .where(eq(events.id, input.eventId));
+
+      if (!event) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Event not found' });
+      }
+
+      const stripe = new Stripe(ctx.env.STRIPE_SECRET_KEY, {
+        httpClient: Stripe.createFetchHttpClient(),
+      });
+
+      const session = await stripe.checkout.sessions.create({
+        mode: 'payment',
+        line_items: [
+          {
+            price_data: {
+              currency: 'gbp',
+              unit_amount: event.pricePerSeat,
+              product_data: {
+                name: event.name,
+                description: `${input.seatCount} seat(s) for ${event.name}`,
+              },
+            },
+            quantity: input.seatCount,
+          },
+        ],
+        payment_intent_data: {
+          metadata: {
+            holdId: input.holdId,
+            eventId: input.eventId,
+            userId: ctx.userId,
+          },
+        },
+        success_url: 'https://event-booking-web.aditya29.workers.dev/booking/success?session_id={CHECKOUT_SESSION_ID}',
+        cancel_url: 'https://event-booking-web.aditya29.workers.dev/booking/cancelled',
+      });
+
+      return { sessionUrl: session.url };
     }),
 
   checkOrgSync: protectedProcedure.query(async ({ ctx }) => {
