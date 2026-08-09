@@ -7,6 +7,7 @@ import { Webhook } from 'svix';
 import Stripe from 'stripe';
 import { eq } from 'drizzle-orm';
 import { verifyToken } from '@clerk/backend';
+import { dispatchEmailConfirmation, dispatchCalendarInvite } from './integrations.js';
 
 import { SeatLedger } from "./seat-ledger.js";
 import { RateLimiter } from "./rate-limiter.js";
@@ -160,6 +161,35 @@ export default {
           holdId: holdId,
           stripePaymentIntentId: paymentIntent.id,
         });
+
+        // Fire-and-forget integration stubs.
+        // Errors are swallowed — a failed email must not cause a non-200 response,
+        // which would trigger Stripe to retry the webhook and double-book.
+        try {
+          await dispatchEmailConfirmation({
+            idempotencyKey: holdId,
+            to: attendee.email,
+            attendeeName: attendee.name,
+            eventName: eventId,        // stub: replace with real event name lookup
+            eventDate: Date.now(),     // stub: replace with real event date lookup
+            seatCount: confirmResult.seatCount,
+            bookingId: crypto.randomUUID(), // stub: use actual inserted booking id
+            totalPaidPence: 0,         // stub: replace with real price lookup
+          });
+          await dispatchCalendarInvite({
+            idempotencyKey: holdId,
+            attendeeEmail: attendee.email,
+            organizerEmail: 'organiser@example.com', // stub: replace with real organiser lookup
+            eventName: eventId,
+            eventDate: Date.now(),
+            durationMinutes: 120,
+            locationOrUrl: 'TBD',
+            bookingId: holdId,
+          });
+        } catch {
+          // Stub errors are swallowed — real implementation would log to a dead-letter queue
+          console.error('[INTEGRATIONS] Stub dispatch failed — would DLQ in production');
+        }
 
         return new Response('', { status: 200 });
       }
