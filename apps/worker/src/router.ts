@@ -21,6 +21,7 @@ interface WorkerEnv {
       mintTicket: (userId: string, orgId: string | null, eventId: string) => Promise<string>;
     };
   };
+  EVENT_CACHE: KVNamespace;
 }
 
 // Create a worker-specific procedure that strongly types the environment
@@ -255,6 +256,64 @@ export const appRouter = router({
       const stub = ctx.env.SEAT_LEDGER.get(ctx.env.SEAT_LEDGER.idFromName(input.eventId));
       const ticket = await stub.mintTicket(ctx.userId, ctx.orgId ?? null, input.eventId);
       return { ticket };
+    }),
+
+  getPublicEvent: publicWorkerProcedure
+    .input(z.object({ eventId: z.string() }))
+    .query(async ({ input, ctx }) => {
+      // Check KV cache first — avoids D1 round-trip on hot event pages
+      const cacheKey = `event:${input.eventId}`;
+      const cached = await ctx.env.EVENT_CACHE.get(cacheKey);
+      if (cached !== null) return JSON.parse(cached) as {
+        id: string; name: string; description: string | null; date: number;
+        totalSeats: number; pricePerSeat: number; coverImageUrl: string | null;
+        organisationId: string;
+      };
+
+      // Cache miss — query D1
+      const [event] = await ctx.db
+        .select({
+          id: events.id,
+          name: events.name,
+          description: events.description,
+          date: events.date,
+          totalSeats: events.totalSeats,
+          pricePerSeat: events.pricePerSeat,
+          coverImageUrl: events.coverImageUrl,
+          organisationId: events.organisationId,
+        })
+        .from(events)
+        .where(eq(events.id, input.eventId));
+
+      if (!event) throw new TRPCError({ code: 'NOT_FOUND', message: 'Event not found' });
+
+      const payload = {
+        id: event.id,
+        name: event.name,
+        description: event.description,
+       date: event.date instanceof Date ? event.date.getTime() : Number(event.date), // ← force to ms timestamp
+        totalSeats: event.totalSeats,
+        pricePerSeat: event.pricePerSeat,
+        coverImageUrl: event.coverImageUrl,
+        organisationId: event.organisationId,
+        // NOTE: seat count is deliberately excluded from this cached payload.
+        // Available seats change frequently; they are fetched separately via
+        // getAvailableSeats which reads live from the SeatLedger DO.
+      };
+
+      // Cache for 5 minutes
+      await ctx.env.EVENT_CACHE.put(cacheKey, JSON.stringify(payload), {
+        expirationTtl: 300,
+      });
+
+      return payload;
+    }),
+
+  invalidateEventCache: workerProcedure
+    .input(z.object({ eventId: z.string() }))
+    .mutation(async ({ input, ctx }) => {
+      await ctx.env.EVENT_CACHE.delete(`event:${input.eventId}`);
+      return { invalidated: true };
     }),
 });
 
