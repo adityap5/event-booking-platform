@@ -9,7 +9,8 @@ import { eq } from 'drizzle-orm';
 import { verifyToken } from '@clerk/backend';
 
 import { SeatLedger } from "./seat-ledger.js";
-export { SeatLedger };
+import { RateLimiter } from "./rate-limiter.js";
+export { SeatLedger, RateLimiter };
 
 export type Env = {
   CLERK_JWT_KEY: string;
@@ -19,7 +20,8 @@ export type Env = {
   DB: D1Database;
   SEAT_LEDGER: DurableObjectNamespace<SeatLedger>;
   EVENT_COVERS: R2Bucket;        
-  EVENT_CACHE: KVNamespace;   
+  EVENT_CACHE: KVNamespace;  
+  RATE_LIMITER: DurableObjectNamespace; 
 };
 
 const ALLOWED_ORIGIN = 'https://event-booking-web.aditya29.workers.dev';

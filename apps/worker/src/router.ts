@@ -22,6 +22,12 @@ interface WorkerEnv {
     };
   };
   EVENT_CACHE: KVNamespace;
+  RATE_LIMITER: {
+    idFromName: (name: string) => any;
+    get: (id: any) => {
+      checkLimit: (action: string, limit: number, windowMs: number) => Promise<{ allowed: boolean; remaining: number }>;
+    };
+  };
 }
 
 // Create a worker-specific procedure that strongly types the environment
@@ -90,6 +96,16 @@ export const appRouter = router({
   reserveSeat: workerProcedure
     .input(z.object({ eventId: z.string(), seatCount: z.number().min(1).max(10) }))
     .mutation(async ({ input, ctx }) => {
+      // Rate limit: 10 reservation attempts per userId per 60 seconds
+      const rateLimiter = ctx.env.RATE_LIMITER.get(ctx.env.RATE_LIMITER.idFromName(ctx.userId));
+      const { allowed } = await rateLimiter.checkLimit('reserveSeat', 10, 60_000);
+      if (!allowed) {
+        throw new TRPCError({
+          code: 'TOO_MANY_REQUESTS',
+          message: 'Too many reservation attempts. Try again in a minute.',
+        });
+      }
+
       const id = ctx.env.SEAT_LEDGER.idFromName(input.eventId);
       const stub = ctx.env.SEAT_LEDGER.get(id);
 
