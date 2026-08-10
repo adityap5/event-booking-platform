@@ -1,5 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./index.js";
+import { z } from 'zod';
+
+const socketMessageSchema = z.object({
+  type: z.enum(['ping']),
+});
 
 export class SeatLedger extends DurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
@@ -284,20 +289,19 @@ export class SeatLedger extends DurableObject {
   }
 
   webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
-    try {
-      const data = JSON.parse(typeof message === 'string' ? message : '') as { type?: string };
-
-      if (data.type === 'ping') {
-        ws.send(JSON.stringify({ type: 'pong' }));
-      }
-
-      // Identity always comes from the attachment set at accept time — never trusted from message payload
-      const [userId] = (ws as unknown as { attachment: [string] }).attachment;
-      void userId; // available for future per-user message handling
-    } catch {
-      // Malformed message — ignore silently, do not crash the DO
+  try {
+    const raw = JSON.parse(typeof message === 'string' ? message : '');
+    const parsed = socketMessageSchema.safeParse(raw);
+    if (!parsed.success) return; // Unknown message type — ignore silently
+    if (parsed.data.type === 'ping') {
+      ws.send(JSON.stringify({ type: 'pong' }));
     }
+    const [userId] = (ws as unknown as { attachment: [string] }).attachment;
+    void userId;
+  } catch {
+    // Malformed JSON — ignore
   }
+}
 
   webSocketClose(_ws: WebSocket, code: number, reason: string): void {
     console.log('WebSocket closed', { code, reason });

@@ -2,7 +2,18 @@ import { initTRPC, TRPCError } from '@trpc/server';
 import type { Context } from './context.js';
 import { authorizeOrganiserAccess } from '@event-booking/permissions';
 
-const t = initTRPC.context<Context>().create();
+const t = initTRPC.context<Context>().create({
+  errorFormatter({ shape }) {
+    return {
+      ...shape,
+      data: {
+        ...shape.data,
+        // Never expose stack traces or internal error messages in production
+        stack: process.env.NODE_ENV === 'development' ? shape.data.stack : undefined,
+      },
+    };
+  },
+});
 
 export const router = t.router;
 export const publicProcedure = t.procedure;

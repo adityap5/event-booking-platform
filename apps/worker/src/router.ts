@@ -170,6 +170,13 @@ export const appRouter = router({
       let confirmResult;
       try {
         confirmResult = await stub.confirmSeat(input.holdId);
+        // Security: verify the caller owns this hold
+if (confirmResult.userId !== ctx.userId) {
+  throw new TRPCError({
+    code: 'FORBIDDEN',
+    message: 'This hold does not belong to you.',
+  });
+}
       } catch (err: any) {
         if (err.message === 'HOLD_NOT_FOUND') throw new TRPCError({ code: 'NOT_FOUND', message: err.message });
         if (err.message === 'HOLD_ALREADY_USED') throw new TRPCError({ code: 'CONFLICT', message: err.message });
