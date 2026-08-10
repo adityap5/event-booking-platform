@@ -21,6 +21,13 @@ interface WorkerEnv {
       mintTicket: (userId: string, orgId: string | null, eventId: string) => Promise<string>;
     };
   };
+  EVENT_CACHE: KVNamespace;
+  RATE_LIMITER: {
+    idFromName: (name: string) => any;
+    get: (id: any) => {
+      checkLimit: (action: string, limit: number, windowMs: number) => Promise<{ allowed: boolean; remaining: number }>;
+    };
+  };
 }
 
 // Create a worker-specific procedure that strongly types the environment
@@ -89,6 +96,16 @@ export const appRouter = router({
   reserveSeat: workerProcedure
     .input(z.object({ eventId: z.string(), seatCount: z.number().min(1).max(10) }))
     .mutation(async ({ input, ctx }) => {
+      // Rate limit: 10 reservation attempts per userId per 60 seconds
+      const rateLimiter = ctx.env.RATE_LIMITER.get(ctx.env.RATE_LIMITER.idFromName(ctx.userId));
+      const { allowed } = await rateLimiter.checkLimit('reserveSeat', 10, 60_000);
+      if (!allowed) {
+        throw new TRPCError({
+          code: 'TOO_MANY_REQUESTS',
+          message: 'Too many reservation attempts. Try again in a minute.',
+        });
+      }
+
       const id = ctx.env.SEAT_LEDGER.idFromName(input.eventId);
       const stub = ctx.env.SEAT_LEDGER.get(id);
 
@@ -153,6 +170,13 @@ export const appRouter = router({
       let confirmResult;
       try {
         confirmResult = await stub.confirmSeat(input.holdId);
+        // Security: verify the caller owns this hold
+if (confirmResult.userId !== ctx.userId) {
+  throw new TRPCError({
+    code: 'FORBIDDEN',
+    message: 'This hold does not belong to you.',
+  });
+}
       } catch (err: any) {
         if (err.message === 'HOLD_NOT_FOUND') throw new TRPCError({ code: 'NOT_FOUND', message: err.message });
         if (err.message === 'HOLD_ALREADY_USED') throw new TRPCError({ code: 'CONFLICT', message: err.message });
@@ -255,6 +279,64 @@ export const appRouter = router({
       const stub = ctx.env.SEAT_LEDGER.get(ctx.env.SEAT_LEDGER.idFromName(input.eventId));
       const ticket = await stub.mintTicket(ctx.userId, ctx.orgId ?? null, input.eventId);
       return { ticket };
+    }),
+
+  getPublicEvent: publicWorkerProcedure
+    .input(z.object({ eventId: z.string() }))
+    .query(async ({ input, ctx }) => {
+      // Check KV cache first — avoids D1 round-trip on hot event pages
+      const cacheKey = `event:${input.eventId}`;
+      const cached = await ctx.env.EVENT_CACHE.get(cacheKey);
+      if (cached !== null) return JSON.parse(cached) as {
+        id: string; name: string; description: string | null; date: number;
+        totalSeats: number; pricePerSeat: number; coverImageUrl: string | null;
+        organisationId: string;
+      };
+
+      // Cache miss — query D1
+      const [event] = await ctx.db
+        .select({
+          id: events.id,
+          name: events.name,
+          description: events.description,
+          date: events.date,
+          totalSeats: events.totalSeats,
+          pricePerSeat: events.pricePerSeat,
+          coverImageUrl: events.coverImageUrl,
+          organisationId: events.organisationId,
+        })
+        .from(events)
+        .where(eq(events.id, input.eventId));
+
+      if (!event) throw new TRPCError({ code: 'NOT_FOUND', message: 'Event not found' });
+
+      const payload = {
+        id: event.id,
+        name: event.name,
+        description: event.description,
+       date: event.date instanceof Date ? event.date.getTime() : Number(event.date), // ← force to ms timestamp
+        totalSeats: event.totalSeats,
+        pricePerSeat: event.pricePerSeat,
+        coverImageUrl: event.coverImageUrl,
+        organisationId: event.organisationId,
+        // NOTE: seat count is deliberately excluded from this cached payload.
+        // Available seats change frequently; they are fetched separately via
+        // getAvailableSeats which reads live from the SeatLedger DO.
+      };
+
+      // Cache for 5 minutes
+      await ctx.env.EVENT_CACHE.put(cacheKey, JSON.stringify(payload), {
+        expirationTtl: 300,
+      });
+
+      return payload;
+    }),
+
+  invalidateEventCache: workerProcedure
+    .input(z.object({ eventId: z.string() }))
+    .mutation(async ({ input, ctx }) => {
+      await ctx.env.EVENT_CACHE.delete(`event:${input.eventId}`);
+      return { invalidated: true };
     }),
 });
 

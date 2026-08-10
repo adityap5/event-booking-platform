@@ -33,17 +33,16 @@
 
   "durable_objects": {
     "bindings": [
-      {
-        "name": "SEAT_LEDGER",
-        "class_name": "SeatLedger"
-      }
-    ]
+    { "name": "SEAT_LEDGER", "class_name": "SeatLedger" },
+    { "name": "RATE_LIMITER", "class_name": "RateLimiter" }
+  ]
   },
 
   "migrations": [
     {
       "tag": "v1",
       "new_sqlite_classes": ["SeatLedger"]
-    }
+    },
+    { "tag": "v2", "new_sqlite_classes": ["RateLimiter"] }
   ]
 }

@@ -6,9 +6,12 @@ import * as schema from '@event-booking/shared';
 import { Webhook } from 'svix';
 import Stripe from 'stripe';
 import { eq } from 'drizzle-orm';
+import { verifyToken } from '@clerk/backend';
+import { dispatchEmailConfirmation, dispatchCalendarInvite } from './integrations.js';
 
 import { SeatLedger } from "./seat-ledger.js";
-export { SeatLedger };
+import { RateLimiter } from "./rate-limiter.js";
+export { SeatLedger, RateLimiter };
 
 export type Env = {
   CLERK_JWT_KEY: string;
@@ -17,6 +20,9 @@ export type Env = {
   STRIPE_WEBHOOK_SECRET: string;
   DB: D1Database;
   SEAT_LEDGER: DurableObjectNamespace<SeatLedger>;
+  EVENT_COVERS: R2Bucket;        
+  EVENT_CACHE: KVNamespace;  
+  RATE_LIMITER: DurableObjectNamespace; 
 };
 
 const ALLOWED_ORIGIN = 'https://event-booking-web.aditya29.workers.dev';
@@ -156,6 +162,35 @@ export default {
           stripePaymentIntentId: paymentIntent.id,
         });
 
+        // Fire-and-forget integration stubs.
+        // Errors are swallowed — a failed email must not cause a non-200 response,
+        // which would trigger Stripe to retry the webhook and double-book.
+        try {
+          await dispatchEmailConfirmation({
+            idempotencyKey: holdId,
+            to: attendee.email,
+            attendeeName: attendee.name,
+            eventName: eventId,        // stub: replace with real event name lookup
+            eventDate: Date.now(),     // stub: replace with real event date lookup
+            seatCount: confirmResult.seatCount,
+            bookingId: crypto.randomUUID(), // stub: use actual inserted booking id
+            totalPaidPence: 0,         // stub: replace with real price lookup
+          });
+          await dispatchCalendarInvite({
+            idempotencyKey: holdId,
+            attendeeEmail: attendee.email,
+            organizerEmail: 'organiser@example.com', // stub: replace with real organiser lookup
+            eventName: eventId,
+            eventDate: Date.now(),
+            durationMinutes: 120,
+            locationOrUrl: 'TBD',
+            bookingId: holdId,
+          });
+        } catch {
+          // Stub errors are swallowed — real implementation would log to a dead-letter queue
+          console.error('[INTEGRATIONS] Stub dispatch failed — would DLQ in production');
+        }
+
         return new Response('', { status: 200 });
       }
 
@@ -193,6 +228,78 @@ export default {
       const id = env.SEAT_LEDGER.idFromName(eventId);
       const stub = env.SEAT_LEDGER.get(id) as DurableObjectStub;
       return stub.fetch(request);
+    }
+
+    // CORS preflight for the event-cover upload endpoint
+    if (url.pathname === '/upload/event-cover' && request.method === 'OPTIONS') {
+      return new Response(null, {
+        status: 200,
+        headers: {
+          'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
+          'Access-Control-Allow-Methods': 'POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+          'Access-Control-Max-Age': '86400',
+        },
+      });
+    }
+
+    // Handle event cover image uploads
+    if (url.pathname === '/upload/event-cover' && request.method === 'POST') {
+      // Verify auth
+      const authHeader = request.headers.get('Authorization');
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      const token = authHeader.slice(7);
+      try {
+        await verifyToken(token, {
+          jwtKey: env.CLERK_JWT_KEY,
+          authorizedParties: [
+            'https://event-booking-web.aditya29.workers.dev',
+            'http://localhost:3000',
+          ],
+        });
+      } catch {
+        return new Response('Unauthorized', { status: 401 });
+      }
+
+      // Parse multipart form data
+      const formData = await request.formData();
+      const file = formData.get('file') as File | null;
+      const eventId = formData.get('eventId') as string | null;
+      if (file === null || eventId === null || eventId === '') {
+        return new Response('Missing file or eventId', { status: 400 });
+      }
+
+      // Server-side file validation — check the Content-Type of the file part
+      const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
+      if (!allowedTypes.includes(file.type)) {
+        return new Response('Invalid file type. Allowed: jpeg, png, webp', { status: 400 });
+      }
+      const MAX_SIZE = 5 * 1024 * 1024; // 5MB
+      if (file.size > MAX_SIZE) {
+        return new Response('File too large. Maximum 5MB', { status: 400 });
+      }
+
+      // Deterministic R2 key — never exposes the original filename
+      const ext = file.type === 'image/jpeg' ? 'jpg'
+                : file.type === 'image/png'  ? 'png'
+                : 'webp';
+      const key = `events/${eventId}/${crypto.randomUUID()}.${ext}`;
+
+      // Upload to R2
+      const buffer = await file.arrayBuffer();
+      await env.EVENT_COVERS.put(key, buffer, {
+        httpMetadata: { contentType: file.type },
+      });
+
+      return new Response(JSON.stringify({ key }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
+        },
+      });
     }
 
     // Handle CORS preflight requests for tRPC
