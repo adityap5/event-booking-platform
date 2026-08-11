@@ -21,7 +21,11 @@ interface WorkerEnv {
       mintTicket: (userId: string, orgId: string | null, eventId: string) => Promise<string>;
     };
   };
-  EVENT_CACHE: KVNamespace;
+  EVENT_CACHE: {
+    get: (key: string) => Promise<string | null>;
+    put: (key: string, value: string, opts?: { expirationTtl?: number }) => Promise<void>;
+    delete: (key: string) => Promise<void>;
+  };
   RATE_LIMITER: {
     idFromName: (name: string) => any;
     get: (id: any) => {
@@ -167,22 +171,19 @@ export const appRouter = router({
       const id = ctx.env.SEAT_LEDGER.idFromName(input.eventId);
       const stub = ctx.env.SEAT_LEDGER.get(id);
 
-      let confirmResult;
-      try {
+      let confirmResult: { userId: string; seatCount: number };
+try {
         confirmResult = await stub.confirmSeat(input.holdId);
-        // Security: verify the caller owns this hold
-if (confirmResult.userId !== ctx.userId) {
-  throw new TRPCError({
-    code: 'FORBIDDEN',
-    message: 'This hold does not belong to you.',
-  });
-}
       } catch (err: any) {
         if (err.message === 'HOLD_NOT_FOUND') throw new TRPCError({ code: 'NOT_FOUND', message: err.message });
-        if (err.message === 'HOLD_ALREADY_USED') throw new TRPCError({ code: 'CONFLICT', message: err.message });
-        if (err.message === 'HOLD_EXPIRED') throw new TRPCError({ code: 'PRECONDITION_FAILED', message: err.message });
-        throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: err.message });
+  if (err.message === 'HOLD_ALREADY_USED') throw new TRPCError({ code: 'CONFLICT', message: err.message });
+  if (err.message === 'HOLD_EXPIRED') throw new TRPCError({ code: 'PRECONDITION_FAILED', message: err.message });
+  throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: err.message });
       }
+      // Security: verify the caller owns this hold — OUTSIDE the try block
+if (confirmResult.userId !== ctx.userId) {
+  throw new TRPCError({ code: 'FORBIDDEN', message: 'This hold does not belong to you.' });
+}
 
       const [booking] = await ctx.db.insert(schema.bookings).values({
         id: crypto.randomUUID(),

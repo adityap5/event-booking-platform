@@ -6,12 +6,13 @@ export function middleware(request: NextRequest) {
 
   // Define public routes
   const isPublicPath = 
-    pathname === '/' || 
-    pathname.startsWith('/sign-in') || 
-    pathname.startsWith('/sign-up') ||
-    pathname.startsWith('/api/') || 
-    pathname.startsWith('/trpc/');
-
+     pathname === '/' || 
+  pathname.startsWith('/sign-in') || 
+  pathname.startsWith('/sign-up') ||
+  pathname.startsWith('/api/') || 
+  pathname.startsWith('/trpc/') ||
+  pathname.startsWith('/events/') || 
+  pathname.startsWith('/booking/');   
   if (isPublicPath) {
     return NextResponse.next();
   }
