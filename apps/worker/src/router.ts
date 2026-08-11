@@ -6,6 +6,7 @@ import { eq } from 'drizzle-orm';
 import Stripe from 'stripe';
 
 import { TRPCError } from '@trpc/server';
+import type { R2Bucket } from '@cloudflare/workers-types';
 
 interface WorkerEnv {
   STRIPE_SECRET_KEY: string;
@@ -32,6 +33,7 @@ interface WorkerEnv {
       checkLimit: (action: string, limit: number, windowMs: number) => Promise<{ allowed: boolean; remaining: number }>;
     };
   };
+  EVENT_COVERS: R2Bucket;
 }
 
 // Create a worker-specific procedure that strongly types the environment
@@ -362,6 +364,72 @@ if (confirmResult.userId !== ctx.userId) {
       date: event.date instanceof Date ? event.date.getTime() : Number(event.date),
     }));
   }),
+
+  createEvent: workerProcedure
+    .input(z.object({
+      name: z.string().min(1).max(200),
+      description: z.string().max(2000).optional(),
+      date: z.number(),
+      totalSeats: z.number().int().min(1).max(100000),
+      pricePerSeat: z.number().int().min(0),
+      tempImageKey: z.string().optional(),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      if (!ctx.orgId) {
+        throw new TRPCError({
+          code: 'FORBIDDEN',
+          message: 'Only organisers with an active organisation can create events.',
+        });
+      }
+
+      const eventId = crypto.randomUUID();
+
+      // Finalize the temp cover image, if one was provided
+      let coverImageUrl: string | null = null;
+      if (input.tempImageKey) {
+        const expectedPrefix = `uploads/tmp/${ctx.userId}/`;
+        if (!input.tempImageKey.startsWith(expectedPrefix)) {
+          // Malformed / tampered key — silently ignore, proceed with no image
+          console.error('[createEvent] tempImageKey prefix mismatch, ignoring:', input.tempImageKey);
+        } else {
+          try {
+            const tempObject = await ctx.env.EVENT_COVERS.get(input.tempImageKey);
+            if (tempObject === null) {
+              // Object expired or already cleaned up — proceed with no image
+              console.error('[createEvent] tempImageKey not found in R2, proceeding without image:', input.tempImageKey);
+            } else {
+              // Derive extension from the temp key (ends in .jpg / .png / .webp)
+              const ext = input.tempImageKey.split('.').pop() ?? 'jpg';
+              const finalKey = `events/${eventId}/cover.${ext}`;
+
+              // R2 has no copy() — get body, put at final key, then delete temp
+              await ctx.env.EVENT_COVERS.put(finalKey, tempObject.body, {
+                httpMetadata: { contentType: tempObject.httpMetadata?.contentType },
+              });
+              await ctx.env.EVENT_COVERS.delete(input.tempImageKey);
+
+              coverImageUrl = `https://event-booking-worker.aditya29.workers.dev/images/events/${eventId}/cover.${ext}`;
+            }
+          } catch (err) {
+            // R2 error must not block event creation — log and continue with no image
+            console.error('[createEvent] R2 image finalize failed, creating event without cover:', err);
+          }
+        }
+      }
+
+      const [created] = await ctx.db.insert(schema.events).values({
+        id: eventId,
+        organisationId: ctx.orgId, // always from verified JWT, never from input
+        name: input.name,
+        description: input.description ?? null,
+        date: new Date(input.date), // mode:'timestamp' — Drizzle expects a Date object
+        totalSeats: input.totalSeats,
+        pricePerSeat: input.pricePerSeat,
+        coverImageUrl,
+      }).returning({ id: schema.events.id, name: schema.events.name });
+
+      return created;
+    }),
 });
 
 export type AppRouter = typeof appRouter;

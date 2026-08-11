@@ -58,9 +58,9 @@ export default function DashboardPage() {
         <div style={{ marginTop: '2rem', padding: '1.5rem', border: '1px solid #eaeaea', borderRadius: '8px' }}>
           <h2>Welcome Organiser!</h2>
           <p>Organization: {organization.name} ({orgId})</p>
-          <button style={{ padding: '0.5rem 1rem', fontSize: '1rem', marginTop: '1rem', cursor: 'not-allowed', backgroundColor: '#e0e0e0', color: '#666', border: 'none', borderRadius: '4px' }} disabled>
-            Create Event (Coming Soon)
-          </button>
+          <Link href="/events/create" style={{ display: 'inline-block', marginTop: '1rem', padding: '0.5rem 1rem', fontSize: '1rem', backgroundColor: '#0070f3', color: 'white', textDecoration: 'none', borderRadius: '4px', fontWeight: 500 }}>
+            Create Event
+          </Link>
         </div>
       ) : (
         // Attendee View
