@@ -339,6 +339,29 @@ if (confirmResult.userId !== ctx.userId) {
       await ctx.env.EVENT_CACHE.delete(`event:${input.eventId}`);
       return { invalidated: true };
     }),
+
+  listOrgEvents: protectedProcedure.query(async ({ ctx }) => {
+    if (!ctx.orgId) {
+      throw new TRPCError({ code: 'FORBIDDEN', message: 'No active organisation.' });
+    }
+
+    const rows = await ctx.db
+      .select({
+        id: events.id,
+        name: events.name,
+        date: events.date,
+        totalSeats: events.totalSeats,
+        pricePerSeat: events.pricePerSeat,
+        coverImageUrl: events.coverImageUrl,
+      })
+      .from(events)
+      .where(eq(events.organisationId, ctx.orgId));
+
+    return rows.map((event) => ({
+      ...event,
+      date: event.date instanceof Date ? event.date.getTime() : Number(event.date),
+    }));
+  }),
 });
 
 export type AppRouter = typeof appRouter;
