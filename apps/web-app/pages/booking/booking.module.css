@@ -1,0 +1,56 @@
+/* Shared styles for booking/success and booking/cancelled */
+
+.container {
+  max-width: 560px;
+  margin: 4rem auto;
+  padding: 2rem 1rem;
+  font-family: sans-serif;
+  text-align: center;
+}
+
+.icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background-color: #27ae60;
+  color: white;
+  font-size: 2rem;
+  line-height: 64px;
+  margin: 0 auto 1.5rem;
+}
+
+.heading {
+  font-size: 2rem;
+  font-weight: 700;
+  margin-bottom: 1rem;
+  color: #333;
+}
+
+.body {
+  color: #555;
+  line-height: 1.6;
+  margin-bottom: 1.5rem;
+}
+
+.bodyLarge {
+  color: #555;
+  line-height: 1.6;
+  margin-bottom: 2rem;
+}
+
+.reference {
+  font-size: 0.8rem;
+  color: #999;
+  margin-bottom: 2rem;
+  word-break: break-all;
+}
+
+.cta {
+  display: inline-block;
+  padding: 0.75rem 1.5rem;
+  background-color: #0070f3;
+  color: white;
+  text-decoration: none;
+  border-radius: 6px;
+  font-weight: 500;
+}
