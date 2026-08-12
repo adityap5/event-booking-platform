@@ -4,11 +4,13 @@ import * as schema from '@event-booking/shared';
 import { events } from '@event-booking/shared';
 import { eq, gte, asc, and } from 'drizzle-orm';
 import Stripe from 'stripe';
+import { createClerkClient } from '@clerk/backend';
 
 import { TRPCError } from '@trpc/server';
 import type { R2Bucket } from '@cloudflare/workers-types';
 
 interface WorkerEnv {
+  CLERK_SECRET_KEY: string;
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;  
   SEAT_LEDGER: {
@@ -77,6 +79,34 @@ export const appRouter = router({
       return { name: event?.name };
     }),
 
+  getEventAttendees: protectedProcedure
+    .input(z.object({ eventId: z.string() }))
+    .use(enforceOrganiserAccess<{ eventId: string }>(async ({ input, ctx }) => {
+      const db = ctx.db; 
+      const [event] = await db.select().from(events).where(eq(events.id, input.eventId));
+      return event?.organisationId || null;
+    }))
+    .query(async ({ input, ctx }) => {
+      const rows = await ctx.db
+        .select({
+          id: schema.bookings.id,
+          seatCount: schema.bookings.seatCount,
+          attendeeName: schema.attendees.name,
+          attendeeEmail: schema.attendees.email,
+        })
+        .from(schema.bookings)
+        .innerJoin(schema.attendees, eq(schema.bookings.attendeeId, schema.attendees.id))
+        .where(
+          and(
+            eq(schema.bookings.eventId, input.eventId),
+            eq(schema.bookings.status, 'confirmed'),
+          )
+        )
+        .orderBy(asc(schema.bookings.createdAt));
+
+      return rows;
+    }),
+
   getAvailableSeats: publicWorkerProcedure
     .input(z.object({ eventId: z.string() }))
     .query(async ({ input, ctx }) => {
@@ -134,19 +164,32 @@ export const appRouter = router({
       }
     }),
 
-  ensureAttendee: protectedProcedure.mutation(async ({ ctx }) => {
+  ensureAttendee: workerProcedure.mutation(async ({ ctx }) => {
     const db = ctx.db;
     const [attendee] = await db.select().from(schema.attendees).where(eq(schema.attendees.userId, ctx.userId));
     if (attendee) {
       return attendee;
     }
     
+    let resolvedEmail = '';
+    let resolvedName = 'Attendee';
+    try {
+      const clerk = createClerkClient({ secretKey: ctx.env.CLERK_SECRET_KEY });
+      const user = await clerk.users.getUser(ctx.userId);
+      const primaryEmail = user.emailAddresses.find(e => e.id === user.primaryEmailAddressId);
+      resolvedEmail = primaryEmail?.emailAddress || user.emailAddresses[0]?.emailAddress || '';
+      const fullName = `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim();
+      resolvedName = fullName || resolvedEmail || 'Attendee';
+    } catch (err) {
+      console.error('Failed to fetch user from Clerk:', err);
+    }
+
     try {
       const [newAttendee] = await db.insert(schema.attendees).values({
         id: crypto.randomUUID(),
         userId: ctx.userId,
-        email: '',
-        name: 'Attendee',
+        email: resolvedEmail,
+        name: resolvedName,
       }).returning();
       return newAttendee;
     } catch (err: any) {

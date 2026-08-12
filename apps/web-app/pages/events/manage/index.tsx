@@ -25,8 +25,33 @@ interface OrgEvent {
 // (Rules of Hooks: hooks cannot be called inside .map())
 // ---------------------------------------------------------------------------
 
+type AttendeeRow = {
+  id: string;
+  seatCount: number;
+  attendeeName: string;
+  attendeeEmail: string;
+};
+
 function EventManageRow({ id, name, date, totalSeats, pricePerSeat, coverImageUrl }: OrgEvent) {
+  const { getToken } = useAuth();
   const available = useSeatCount(id);
+
+  const [expanded, setExpanded] = useState(false);
+  const [attendees, setAttendees] = useState<AttendeeRow[] | null>(null);
+  const [loadingAttendees, setLoadingAttendees] = useState(false);
+  const [attendeesError, setAttendeesError] = useState<string | null>(null);
+
+  const handleToggle = () => {
+    if (!expanded && attendees === null) {
+      setLoadingAttendees(true);
+      const trpc = createAuthenticatedTRPCClient(getToken);
+      trpc.getEventAttendees.query({ eventId: id })
+        .then(setAttendees)
+        .catch((err: unknown) => setAttendeesError(err instanceof Error ? err.message : 'Error loading attendees'))
+        .finally(() => setLoadingAttendees(false));
+    }
+    setExpanded(!expanded);
+  };
 
   const formattedDate = new Date(date).toLocaleDateString('en-GB', {
     weekday: 'long',
@@ -49,6 +74,33 @@ function EventManageRow({ id, name, date, totalSeats, pricePerSeat, coverImageUr
         <p className={available === 0 ? styles.rowSeatsLow : styles.rowSeats}>
           Available: {available !== null ? `${available} / ${totalSeats}` : 'Loading…'}
         </p>
+
+        <button onClick={handleToggle} className={styles.attendeeToggle}>
+          {expanded ? 'Hide attendees' : 'View attendees'}
+        </button>
+
+        {expanded && (
+          <div className={styles.attendeesContainer}>
+            {loadingAttendees && <p className={styles.attendeeState}>Loading attendees…</p>}
+            {!loadingAttendees && attendeesError && <p className={styles.attendeeError}>{attendeesError}</p>}
+            {!loadingAttendees && !attendeesError && attendees !== null && attendees.length === 0 && (
+              <p className={styles.attendeeState}>No confirmed bookings yet.</p>
+            )}
+            {!loadingAttendees && !attendeesError && attendees !== null && attendees.length > 0 && (
+              <ul className={styles.attendeeList}>
+                {attendees.map((a) => (
+                  <li key={a.id} className={styles.attendeeRow}>
+                    <div>
+                      <span className={styles.attendeeName}>{a.attendeeName}</span>
+                      <span className={styles.attendeeEmail}>({a.attendeeEmail})</span>
+                    </div>
+                    <span className={styles.attendeeSeats}>{a.seatCount} seat{a.seatCount !== 1 ? 's' : ''}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
