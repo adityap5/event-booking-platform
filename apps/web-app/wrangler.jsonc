@@ -8,5 +8,11 @@
   "assets": {
     "directory": ".open-next/assets",
     "binding": "ASSETS"
-  }
+  },
+  "services": [
+    {
+      "binding": "WORKER_SERVICE",
+      "service": "event-booking-worker"
+    }
+  ]
 }

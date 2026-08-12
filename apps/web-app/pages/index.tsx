@@ -1,6 +1,7 @@
 import Head from 'next/head';
 import Link from 'next/link';
 import { createTRPCClient, httpBatchLink } from '@trpc/client';
+import { getCloudflareContext } from '@opennextjs/cloudflare';
 import type { AppRouter } from '@event-booking/worker/src/router';
 import type { GetServerSideProps, InferGetServerSidePropsType } from 'next';
 import styles from './home.module.css';
@@ -18,10 +19,14 @@ interface PublicEvent {
 // getServerSideProps — fetch upcoming events server-side (no auth needed)
 // ---------------------------------------------------------------------------
 export const getServerSideProps = (async () => {
+  // Note: getCloudflareContext() may throw or return undefined outside of the deployed Workers runtime (e.g., during local next dev).
+  const { env } = getCloudflareContext();
+
   const trpc = createTRPCClient<AppRouter>({
     links: [
       httpBatchLink({
-        url: process.env.NEXT_PUBLIC_TRPC_URL!,
+        url: 'https://internal/trpc',
+        fetch: (input, init) => env.WORKER_SERVICE.fetch(input as string, init as RequestInit),
       }),
     ],
   });

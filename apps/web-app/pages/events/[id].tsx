@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useAuth, SignInButton } from '@clerk/nextjs';
 import { createTRPCClient, httpBatchLink } from '@trpc/client';
+import { getCloudflareContext } from '@opennextjs/cloudflare';
 import { createAuthenticatedTRPCClient } from '../../lib/trpc';
 import { useSeatCount } from '../../hooks/useSeatCount';
 import type { AppRouter } from '@event-booking/worker/src/router';
@@ -28,11 +29,15 @@ interface EventData {
 export const getServerSideProps = (async (context) => {
   const eventId = context.params?.id as string;
 
+  // Note: getCloudflareContext() may throw or return undefined outside of the deployed Workers runtime (e.g., during local next dev).
+  const { env } = getCloudflareContext();
+
   // Public tRPC client — no auth header, runs in Workers runtime (no Node APIs)
   const trpc = createTRPCClient<AppRouter>({
     links: [
       httpBatchLink({
-        url: process.env.NEXT_PUBLIC_TRPC_URL!,
+        url: 'https://internal/trpc',
+        fetch: (input, init) => env.WORKER_SERVICE.fetch(input as string, init as RequestInit),
       }),
     ],
   });
@@ -231,3 +236,4 @@ export default function EventPage({
     </div>
   );
 }
+
