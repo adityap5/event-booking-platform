@@ -2,7 +2,7 @@ import { router, protectedProcedure, publicProcedure, enforceOrganiserAccess } f
 import { z } from 'zod';
 import * as schema from '@event-booking/shared';
 import { events } from '@event-booking/shared';
-import { eq } from 'drizzle-orm';
+import { eq, gte, asc, and } from 'drizzle-orm';
 import Stripe from 'stripe';
 
 import { TRPCError } from '@trpc/server';
@@ -280,6 +280,18 @@ if (confirmResult.userId !== ctx.userId) {
     .input(z.object({ eventId: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const stub = ctx.env.SEAT_LEDGER.get(ctx.env.SEAT_LEDGER.idFromName(input.eventId));
+
+      const available = await stub.getAvailableSeats();
+      if (available === null) {
+        const [event] = await ctx.db.select({ totalSeats: events.totalSeats })
+          .from(events)
+          .where(eq(events.id, input.eventId));
+          
+        if (!event) throw new TRPCError({ code: 'NOT_FOUND', message: 'Event not found' });
+        
+        await stub.initialize(event.totalSeats);
+      }
+
       const ticket = await stub.mintTicket(ctx.userId, ctx.orgId ?? null, input.eventId);
       return { ticket };
     }),
@@ -362,6 +374,61 @@ if (confirmResult.userId !== ctx.userId) {
     return rows.map((event) => ({
       ...event,
       date: event.date instanceof Date ? event.date.getTime() : Number(event.date),
+    }));
+  }),
+
+  listPublicEvents: publicWorkerProcedure.query(async ({ ctx }) => {
+    const now = new Date(Date.now());
+
+    const rows = await ctx.db
+      .select({
+        id: events.id,
+        name: events.name,
+        date: events.date,
+        totalSeats: events.totalSeats,
+        pricePerSeat: events.pricePerSeat,
+        coverImageUrl: events.coverImageUrl,
+      })
+      .from(events)
+      .where(gte(events.date, now))
+      .orderBy(asc(events.date));
+
+    return rows.map((event) => ({
+      ...event,
+      date: event.date instanceof Date ? event.date.getTime() : Number(event.date),
+    }));
+  }),
+
+  listMyBookings: protectedProcedure.query(async ({ ctx }) => {
+    // Attendee row may not exist if the user has never booked — return empty array
+    const [attendee] = await ctx.db
+      .select()
+      .from(schema.attendees)
+      .where(eq(schema.attendees.userId, ctx.userId));
+    if (!attendee) return [];
+
+    const rows = await ctx.db
+      .select({
+        id: schema.bookings.id,
+        seatCount: schema.bookings.seatCount,
+        eventId: events.id,
+        eventName: events.name,
+        eventDate: events.date,
+        eventCoverImageUrl: events.coverImageUrl,
+      })
+      .from(schema.bookings)
+      .innerJoin(events, eq(schema.bookings.eventId, events.id))
+      .where(
+        and(
+          eq(schema.bookings.attendeeId, attendee.id),
+          eq(schema.bookings.status, 'confirmed'),
+        )
+      )
+      .orderBy(asc(events.date));
+
+    return rows.map((row) => ({
+      ...row,
+      eventDate: row.eventDate instanceof Date ? row.eventDate.getTime() : Number(row.eventDate),
     }));
   }),
 
