@@ -492,6 +492,15 @@ if (confirmResult.userId !== ctx.userId) {
         });
       }
 
+      const rateLimiter = ctx.env.RATE_LIMITER.get(ctx.env.RATE_LIMITER.idFromName(ctx.orgId));
+      const { allowed } = await rateLimiter.checkLimit('createEvent', 5, 60 * 60_000);
+      if (!allowed) {
+        throw new TRPCError({
+          code: 'TOO_MANY_REQUESTS',
+          message: 'Too many events created recently. Try again later.',
+        });
+      }
+
       const eventId = crypto.randomUUID();
 
       // Finalize the temp cover image, if one was provided
