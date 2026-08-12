@@ -54,6 +54,8 @@ export default function HomePage({
               year: 'numeric',
               month: 'short',
               day: 'numeric',
+              hour: '2-digit',
+  minute: '2-digit',
             });
             const formattedPrice = `£${(event.pricePerSeat / 100).toFixed(2)} per seat`;
 

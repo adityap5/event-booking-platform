@@ -14,6 +14,7 @@ import { RateLimiter } from "./rate-limiter.js";
 export { SeatLedger, RateLimiter };
 
 export type Env = {
+  CLERK_SECRET_KEY: string;
   CLERK_JWT_KEY: string;
   CLERK_WEBHOOK_SECRET: string;
   STRIPE_SECRET_KEY: string;
@@ -243,7 +244,7 @@ export default {
       });
     }
 
-    // Handle event cover image uploads
+    // Handle event cover image uploads (temp upload — eventId not required at this stage)
     if (url.pathname === '/upload/event-cover' && request.method === 'POST') {
       // Verify auth
       const authHeader = request.headers.get('Authorization');
@@ -251,24 +252,26 @@ export default {
         return new Response('Unauthorized', { status: 401 });
       }
       const token = authHeader.slice(7);
+      let verifiedToken: Awaited<ReturnType<typeof verifyToken>>;
       try {
-        await verifyToken(token, {
+        verifiedToken = await verifyToken(token, {
           jwtKey: env.CLERK_JWT_KEY,
           authorizedParties: [
             'https://event-booking-web.aditya29.workers.dev',
             'http://localhost:3000',
+            'http://172.18.225.133:3000',
           ],
         });
       } catch {
         return new Response('Unauthorized', { status: 401 });
       }
+      const userId = verifiedToken.sub;
 
       // Parse multipart form data
       const formData = await request.formData();
       const file = formData.get('file') as File | null;
-      const eventId = formData.get('eventId') as string | null;
-      if (file === null || eventId === null || eventId === '') {
-        return new Response('Missing file or eventId', { status: 400 });
+      if (file === null) {
+        return new Response('Missing file', { status: 400 });
       }
 
       // Server-side file validation — check the Content-Type of the file part
@@ -281,11 +284,12 @@ export default {
         return new Response('File too large. Maximum 5MB', { status: 400 });
       }
 
-      // Deterministic R2 key — never exposes the original filename
+      // Temporary R2 key — scoped to the uploading user, never exposes the original filename
       const ext = file.type === 'image/jpeg' ? 'jpg'
                 : file.type === 'image/png'  ? 'png'
                 : 'webp';
-      const key = `events/${eventId}/${crypto.randomUUID()}.${ext}`;
+      const tempId = crypto.randomUUID();
+      const key = `uploads/tmp/${userId}/${tempId}.${ext}`;
 
       // Upload to R2
       const buffer = await file.arrayBuffer();
@@ -293,10 +297,34 @@ export default {
         httpMetadata: { contentType: file.type },
       });
 
-      return new Response(JSON.stringify({ key }), {
+      return new Response(JSON.stringify({ tempImageKey: key }), {
         status: 200,
         headers: {
           'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
+        },
+      });
+    }
+
+    // Serve R2 cover images publicly — no auth required, images are public by design
+    if (url.pathname.startsWith('/images/')) {
+      const key = url.pathname.slice('/images/'.length);
+      if (!key) {
+        return new Response('Not Found', { status: 404 });
+      }
+
+      const object = await env.EVENT_COVERS.get(key);
+      if (object === null) {
+        return new Response('Not Found', { status: 404 });
+      }
+
+      const contentType = object.httpMetadata?.contentType ?? 'application/octet-stream';
+      return new Response(object.body, {
+        status: 200,
+        headers: {
+          'Content-Type': contentType,
+          // Keys are UUID-based and immutable once written — safe to cache hard
+          'Cache-Control': 'public, max-age=31536000, immutable',
           'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
         },
       });
@@ -322,7 +350,7 @@ export default {
         createContext({
           ...opts,
           clerkJwtKey: env.CLERK_JWT_KEY,
-          authorizedParties: [ALLOWED_ORIGIN, 'http://localhost:3000'],
+          authorizedParties: [ALLOWED_ORIGIN, 'http://localhost:3000','http://172.18.225.133:3000'],
           db: drizzle(env.DB, { schema }),
           env,
         }),

@@ -148,7 +148,8 @@ export default function DashboardPage() {
                           <p className={styles.bookingName}>{booking.eventName}</p>
                           <p className={styles.bookingMeta}>
                             {new Date(booking.eventDate).toLocaleDateString('en-GB', {
-                              weekday: 'short', year: 'numeric', month: 'short', day: 'numeric',
+                              weekday: 'short', year: 'numeric', month: 'short', day: 'numeric',hour: '2-digit',
+  minute: '2-digit',
                             })}
                           </p>
                           <p className={styles.bookingMeta}>

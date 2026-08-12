@@ -1,4 +1,5 @@
 import { router, protectedProcedure, publicProcedure, enforceOrganiserAccess } from '@event-booking/trpc';
+import { requireActiveOrganisation } from '@event-booking/permissions';
 import { z } from 'zod';
 import * as schema from '@event-booking/shared';
 import { events } from '@event-booking/shared';
@@ -398,9 +399,7 @@ if (confirmResult.userId !== ctx.userId) {
     }),
 
   listOrgEvents: protectedProcedure.query(async ({ ctx }) => {
-    if (!ctx.orgId) {
-      throw new TRPCError({ code: 'FORBIDDEN', message: 'No active organisation.' });
-    }
+    const orgId = requireActiveOrganisation(ctx);
 
     const rows = await ctx.db
       .select({
@@ -412,7 +411,7 @@ if (confirmResult.userId !== ctx.userId) {
         coverImageUrl: events.coverImageUrl,
       })
       .from(events)
-      .where(eq(events.organisationId, ctx.orgId));
+      .where(eq(events.organisationId, orgId));
 
     return rows.map((event) => ({
       ...event,
@@ -485,14 +484,9 @@ if (confirmResult.userId !== ctx.userId) {
       tempImageKey: z.string().optional(),
     }))
     .mutation(async ({ input, ctx }) => {
-      if (!ctx.orgId) {
-        throw new TRPCError({
-          code: 'FORBIDDEN',
-          message: 'Only organisers with an active organisation can create events.',
-        });
-      }
+      const orgId = requireActiveOrganisation(ctx);
 
-      const rateLimiter = ctx.env.RATE_LIMITER.get(ctx.env.RATE_LIMITER.idFromName(ctx.orgId));
+      const rateLimiter = ctx.env.RATE_LIMITER.get(ctx.env.RATE_LIMITER.idFromName(orgId));
       const { allowed } = await rateLimiter.checkLimit('createEvent', 5, 60 * 60_000);
       if (!allowed) {
         throw new TRPCError({
@@ -538,7 +532,7 @@ if (confirmResult.userId !== ctx.userId) {
 
       const [created] = await ctx.db.insert(schema.events).values({
         id: eventId,
-        organisationId: ctx.orgId, // always from verified JWT, never from input
+        organisationId: orgId, // always from verified JWT, never from input
         name: input.name,
         description: input.description ?? null,
         date: new Date(input.date), // mode:'timestamp' — Drizzle expects a Date object

@@ -58,6 +58,8 @@ function EventManageRow({ id, name, date, totalSeats, pricePerSeat, coverImageUr
     year: 'numeric',
     month: 'long',
     day: 'numeric',
+    hour: '2-digit',
+  minute: '2-digit',
   });
 
   const formattedPrice = `£${(pricePerSeat / 100).toFixed(2)} per seat`;
