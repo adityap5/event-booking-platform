@@ -3,6 +3,7 @@ import { drizzle } from 'drizzle-orm/d1';
 import * as schema from '@event-booking/shared';
 import { eq } from 'drizzle-orm';
 import { dispatchEmailConfirmation, dispatchCalendarInvite } from '../integrations.js';
+import { confirmBookingFromPayment } from '../booking-confirmation.js';
 import type { Env } from '../index.js';
 
 export async function handleStripeWebhook(request: Request, env: Env): Promise<Response | null> {
@@ -36,84 +37,108 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
       const paymentIntent = stripeEvent.data.object as Stripe.PaymentIntent;
       const holdId = paymentIntent.metadata.holdId;
       const eventId = paymentIntent.metadata.eventId;
-      const userId = paymentIntent.metadata.userId;
 
-      if (!holdId || !eventId || !userId) {
+      if (!holdId || !eventId) {
         console.warn('payment_intent.succeeded: missing metadata — not from our checkout flow', paymentIntent.metadata);
         return new Response('', { status: 200 });
       }
 
-      const stub = env.SEAT_LEDGER.get(env.SEAT_LEDGER.idFromName(eventId));
+      const db = drizzle(env.DB, { schema });
+      const seatLedger = env.SEAT_LEDGER.get(env.SEAT_LEDGER.idFromName(eventId));
 
-      let confirmResult: { userId: string; seatCount: number };
+      let result;
       try {
-        confirmResult = await stub.confirmSeat(holdId);
+        result = await confirmBookingFromPayment({
+          db,
+          seatLedger,
+          holdId,
+          eventId,
+          stripePaymentIntentId: paymentIntent.id,
+          amountReceivedPence: paymentIntent.amount_received,
+        });
       } catch (err: any) {
-        if (err.message === 'HOLD_NOT_FOUND') {
-          console.warn('payment_intent.succeeded: HOLD_NOT_FOUND — stale webhook, hold already expired', { holdId, eventId });
-          return new Response('', { status: 200 });
-        }
-        if (err.message === 'HOLD_ALREADY_USED') {
-          console.warn('payment_intent.succeeded: HOLD_ALREADY_USED — already confirmed, idempotent', { holdId, eventId });
-          return new Response('', { status: 200 });
-        }
-        if (err.message === 'HOLD_EXPIRED') {
-          console.warn('payment_intent.succeeded: HOLD_EXPIRED — releasing hold', { holdId, eventId });
-          await stub.releaseSeat(holdId);
-          return new Response('', { status: 200 });
-        }
         console.error('payment_intent.succeeded: unexpected confirmSeat error:', err);
         return new Response('Internal error', { status: 500 });
       }
 
-      const db = drizzle(env.DB, { schema });
-      const [attendee] = await db.select().from(schema.attendees).where(eq(schema.attendees.userId, userId));
+      switch (result.outcome) {
+        case 'hold_not_found':
+          console.warn('payment_intent.succeeded: HOLD_NOT_FOUND — stale webhook, hold already expired', { holdId, eventId });
+          return new Response('', { status: 200 });
 
-      if (!attendee) {
-        console.error('payment_intent.succeeded: attendee not found for userId', userId);
-        return new Response('Attendee not found', { status: 500 });
+        case 'already_confirmed':
+          console.warn('payment_intent.succeeded: HOLD_ALREADY_USED — already confirmed, idempotent', { holdId, eventId });
+          return new Response('', { status: 200 });
+
+        case 'hold_expired':
+          console.warn('payment_intent.succeeded: HOLD_EXPIRED — releasing hold', { holdId, eventId });
+          return new Response('', { status: 200 });
+
+        case 'event_not_found':
+          // No side effects occurred (checked before confirmSeat) — safe to
+          // return 500 and let Stripe retry once the data issue is fixed.
+          console.error('payment_intent.succeeded: event not found', { holdId, eventId });
+          return new Response('Event not found', { status: 500 });
+
+        case 'attendee_not_found':
+          console.error('payment_intent.succeeded: attendee not found for userId', result.userId);
+          return new Response('Attendee not found', { status: 500 });
+
+        case 'orphaned_hold':
+          // The DO shows this hold as consumed but no booking exists in D1.
+          // A previous attempt confirmed the seat, then failed before the
+          // booking insert. Retrying alone will not fix this today (there's
+          // no way to re-derive seatCount/userId once the hold is consumed)
+          // — 500 keeps Stripe retrying in case a fix lands within its retry
+          // window, but this needs eyes-on / day-7 reconciliation regardless.
+          console.error('payment_intent.succeeded: ORPHANED HOLD — DO shows consumed, no D1 booking exists', result);
+          return new Response('Orphaned hold — needs reconciliation', { status: 500 });
+
+        case 'amount_mismatch':
+          // Stripe collected a different amount than pricePerSeat × seatCount implies.
+          // The seat is already consumed in the DO (see helper's comment) and no
+          // booking row was written. This should be effectively unreachable now that
+          // seatCount is derived server-side rather than client-supplied — if it
+          // fires, that invariant has broken somewhere and needs investigating,
+          // not just retrying. Loud on purpose; wire to Sentry/Axiom on days 5–6.
+          console.error('payment_intent.succeeded: AMOUNT MISMATCH — possible seatCount/price desync', result);
+          return new Response('Amount mismatch', { status: 500 });
+
+        case 'confirmed': {
+          const { booking, attendee, seatCount } = result;
+
+          // Fire-and-forget integration stubs.
+          // Errors are swallowed — a failed email must not cause a non-200 response,
+          // which would trigger Stripe to retry the webhook and double-book.
+          try {
+            await dispatchEmailConfirmation({
+              idempotencyKey: holdId,
+              to: attendee.email,
+              attendeeName: attendee.name,
+              eventName: eventId,        // stub: replace with real event name lookup
+              eventDate: Date.now(),     // stub: replace with real event date lookup
+              seatCount,
+              bookingId: booking.id,
+              totalPaidPence: paymentIntent.amount_received,
+            });
+            await dispatchCalendarInvite({
+              idempotencyKey: holdId,
+              attendeeEmail: attendee.email,
+              organizerEmail: 'organiser@example.com', // stub: replace with real organiser lookup
+              eventName: eventId,
+              eventDate: Date.now(),
+              durationMinutes: 120,
+              locationOrUrl: 'TBD',
+              bookingId: booking.id,
+            });
+          } catch {
+            // Stub errors are swallowed — real implementation would log to a dead-letter queue
+            console.error('[INTEGRATIONS] Stub dispatch failed — would DLQ in production');
+          }
+
+          return new Response('', { status: 200 });
+        }
       }
-
-      await db.insert(schema.bookings).values({
-        id: crypto.randomUUID(),
-        eventId: eventId,
-        attendeeId: attendee.id,
-        status: 'confirmed',
-        seatCount: confirmResult.seatCount,
-        holdId: holdId,
-        stripePaymentIntentId: paymentIntent.id,
-      });
-
-      // Fire-and-forget integration stubs.
-      // Errors are swallowed — a failed email must not cause a non-200 response,
-      // which would trigger Stripe to retry the webhook and double-book.
-      try {
-        await dispatchEmailConfirmation({
-          idempotencyKey: holdId,
-          to: attendee.email,
-          attendeeName: attendee.name,
-          eventName: eventId,        // stub: replace with real event name lookup
-          eventDate: Date.now(),     // stub: replace with real event date lookup
-          seatCount: confirmResult.seatCount,
-          bookingId: crypto.randomUUID(), // stub: use actual inserted booking id
-          totalPaidPence: 0,         // stub: replace with real price lookup
-        });
-        await dispatchCalendarInvite({
-          idempotencyKey: holdId,
-          attendeeEmail: attendee.email,
-          organizerEmail: 'organiser@example.com', // stub: replace with real organiser lookup
-          eventName: eventId,
-          eventDate: Date.now(),
-          durationMinutes: 120,
-          locationOrUrl: 'TBD',
-          bookingId: holdId,
-        });
-      } catch {
-        // Stub errors are swallowed — real implementation would log to a dead-letter queue
-        console.error('[INTEGRATIONS] Stub dispatch failed — would DLQ in production');
-      }
-
-      return new Response('', { status: 200 });
     }
 
     if (stripeEvent.type === 'payment_intent.payment_failed') {
@@ -139,6 +164,6 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
     // Acknowledge and ignore all other event types
     return new Response('', { status: 200 });
   }
-  
+
   return null;
 }

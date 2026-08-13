@@ -127,6 +127,21 @@ export class SeatLedger extends DurableObject {
     return { reservationId, expiresAt };
   }
 
+  async getHold(holdId: string): Promise<{ userId: string; seatCount: number; status: string; expiresAt: number } | null> {
+    const holds = this.ctx.storage.sql.exec("SELECT user_id, seat_count, status, expires_at FROM reservations WHERE id = ?", holdId).toArray();
+    if (holds.length === 0) {
+      return null;
+    }
+
+    const hold = holds[0]!;
+    return {
+      userId: hold.user_id as string,
+      seatCount: hold.seat_count as number,
+      status: hold.status as string,
+      expiresAt: hold.expires_at as number,
+    };
+  }
+
   async confirmSeat(holdId: string): Promise<{ userId: string; seatCount: number }> {
     const holds = this.ctx.storage.sql.exec("SELECT user_id, seat_count, status, expires_at FROM reservations WHERE id = ?", holdId).toArray();
     if (holds.length === 0) {
