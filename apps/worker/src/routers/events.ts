@@ -1,4 +1,4 @@
-import { protectedProcedure, enforceOrganiserAccess } from '@event-booking/trpc';
+import { protectedProcedure } from '@event-booking/trpc';
 import { requireActiveOrganisation } from '@event-booking/permissions';
 import { z } from 'zod';
 import * as schema from '@event-booking/shared';
@@ -8,19 +8,6 @@ import { TRPCError } from '@trpc/server';
 import { workerProcedure, publicWorkerProcedure } from '../procedures.js';
 
 export const eventsRouter = {
-  getEvent: protectedProcedure
-    .input(z.object({ eventId: z.string() }))
-    .use(enforceOrganiserAccess<{ eventId: string }>(async ({ input, ctx }) => {
-      const db = ctx.db; 
-      const [event] = await db.select().from(events).where(eq(events.id, input.eventId));
-      return event?.organisationId || null;
-    }))
-    .query(async ({ input, ctx }) => {
-      const db = ctx.db;
-      const [event] = await db.select().from(events).where(eq(events.id, input.eventId));
-      return { name: event?.name };
-    }),
-
   getAvailableSeats: publicWorkerProcedure
     .input(z.object({ eventId: z.string() }))
     .query(async ({ input, ctx }) => {
@@ -92,13 +79,6 @@ export const eventsRouter = {
       });
 
       return payload;
-    }),
-
-  invalidateEventCache: workerProcedure
-    .input(z.object({ eventId: z.string() }))
-    .mutation(async ({ input, ctx }) => {
-      await ctx.env.EVENT_CACHE.delete(`event:${input.eventId}`);
-      return { invalidated: true };
     }),
 
   listOrgEvents: protectedProcedure.query(async ({ ctx }) => {

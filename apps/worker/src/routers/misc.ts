@@ -3,14 +3,6 @@ import * as schema from '@event-booking/shared';
 import { eq } from 'drizzle-orm';
 
 export const miscRouter = {
-  whoami: protectedProcedure.query(({ ctx }) => {
-    return {
-      userId: ctx.userId,
-      orgId: ctx.orgId,
-      role: ctx.role,
-    };
-  }),
-
   checkOrgSync: protectedProcedure.query(async ({ ctx }) => {
     if (!ctx.orgId) return false;
     const db = ctx.db;
