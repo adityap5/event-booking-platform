@@ -93,6 +93,18 @@ export class SeatLedger extends DurableObject {
     if (state.length === 0) {
       throw new Error("Event not initialized");
     }
+
+    // caps concurrent pending holds per user to prevent a single user from holding an unbounded number of seats across repeated reserveSeat calls without ever paying
+    const pendingHolds = this.ctx.storage.sql.exec(
+      "SELECT COUNT(*) as count FROM reservations WHERE user_id = ? AND status = 'pending' AND expires_at > ?",
+      userId,
+      Date.now()
+    ).toArray();
+    const pendingCount = (pendingHolds[0]!.count as number) || 0;
+    if (pendingCount >= 1) {
+      throw new Error("TOO_MANY_PENDING_HOLDS");
+    }
+
     const totalSeats = state[0]!.total_seats as number;
 
     const used = this.ctx.storage.sql.exec("SELECT SUM(seat_count) as used_seats FROM reservations WHERE status = 'pending' OR status = 'confirmed'").toArray();

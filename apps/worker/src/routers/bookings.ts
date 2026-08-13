@@ -66,9 +66,21 @@ export const bookingsRouter = {
       try {
         const result = await stub.reserveSeat(ctx.userId, input.seatCount);
         return result;
-      } catch (err: any) {
-        throw new TRPCError({ code: 'BAD_REQUEST', message: err.message });
-      }
+      } catch (err: unknown) {
+  const message = err instanceof Error ? err.message : 'Unknown error';
+
+  if (message === 'TOO_MANY_PENDING_HOLDS') {
+    throw new TRPCError({
+      code: 'CONFLICT',
+      message,
+    });
+  }
+
+  throw new TRPCError({
+    code: 'BAD_REQUEST',
+    message,
+  });
+}
     }),
 
   ensureAttendee: workerProcedure.mutation(async ({ ctx }) => {
