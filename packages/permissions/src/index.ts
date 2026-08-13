@@ -38,3 +38,18 @@ export function authorizeOrganiserAccess(ctx: AuthContext, resourceOrgId: string
   // Optional: add more checks for specific roles (e.g. 'admin' vs 'member') here if needed
   return true;
 }
+
+/**
+ * Ensures the caller has an active organisation in their context.
+ * Use this for actions scoped to "my own organisation" with no separate target resource
+ * to compare against (e.g. listing my org's events, creating an event under my org).
+ */
+export function requireActiveOrganisation(ctx: AuthContext): string {
+  if (!ctx.orgId) {
+    throw new TRPCError({
+      code: 'FORBIDDEN',
+      message: 'You must be an organiser to access this resource.',
+    });
+  }
+  return ctx.orgId;
+}

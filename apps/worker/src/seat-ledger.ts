@@ -117,6 +117,7 @@ export class SeatLedger extends DurableObject {
     // =========================================================================
 
     this.logEvent({ type: 'RESERVED', holdId: reservationId, userId, seatCount, availableSeats: available - seatCount });
+    this.broadcastSeatCount();
 
     const currentAlarm = await this.ctx.storage.getAlarm();
     if (currentAlarm === null || expiresAt < currentAlarm) {

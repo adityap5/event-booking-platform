@@ -1,33 +1,92 @@
-import type { InferGetServerSidePropsType, GetServerSideProps } from "next";
+import Head from 'next/head';
+import Link from 'next/link';
+import { createTRPCClient, httpBatchLink } from '@trpc/client';
+import { getCloudflareContext } from '@opennextjs/cloudflare';
+import type { AppRouter } from '@event-booking/worker/src/router';
+import type { GetServerSideProps, InferGetServerSidePropsType } from 'next';
+import styles from './home.module.css';
 
-interface HomeProps {
-  timestamp: number;
+interface PublicEvent {
+  id: string;
+  name: string;
+  date: number;
+  totalSeats: number;
+  pricePerSeat: number;
+  coverImageUrl: string | null;
 }
 
-export const getServerSideProps: GetServerSideProps<HomeProps> = async () => {
-  return {
-    props: {
-      timestamp: Date.now(),
-    },
-  };
-};
+// ---------------------------------------------------------------------------
+// getServerSideProps — fetch upcoming events server-side (no auth needed)
+// ---------------------------------------------------------------------------
+export const getServerSideProps = (async () => {
+  // Note: getCloudflareContext() may throw or return undefined outside of the deployed Workers runtime (e.g., during local next dev).
+  const { env } = getCloudflareContext();
 
-export default function Home({
-  timestamp,
+  const trpc = createTRPCClient<AppRouter>({
+    links: [
+      httpBatchLink({
+        url: 'https://internal/trpc',
+        fetch: (input, init) => env.WORKER_SERVICE.fetch(input as string, init as RequestInit),
+      }),
+    ],
+  });
+
+  const events = await trpc.listPublicEvents.query();
+  return { props: { events } };
+}) satisfies GetServerSideProps<{ events: PublicEvent[] }>;
+
+export default function HomePage({
+  events,
 }: InferGetServerSidePropsType<typeof getServerSideProps>) {
   return (
-    <div>
-      <h1>Event Booking Platform</h1>
-      <p>
-        Server-side rendered at:{" "}
-        <strong>{new Date(timestamp).toISOString()}</strong>
-      </p>
-      <p>
-        <small>
-          If this timestamp changes on every refresh, SSR is working — not
-          statically cached.
-        </small>
-      </p>
+    <div className={styles.page}>
+      <Head>
+        <title>Event Booking Platform</title>
+        <meta name="description" content="Browse and book upcoming events." />
+      </Head>
+
+      <header className={styles.header}>
+        <h1 className={styles.title}>Upcoming Events</h1>
+      </header>
+
+      {events.length === 0 ? (
+        <p className={styles.empty}>No upcoming events at the moment. Check back soon!</p>
+      ) : (
+        <ul className={styles.grid}>
+          {events.map((event) => {
+            const formattedDate = new Date(event.date).toLocaleDateString('en-GB', {
+              weekday: 'short',
+              year: 'numeric',
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+  minute: '2-digit',
+            });
+            const formattedPrice = `£${(event.pricePerSeat / 100).toFixed(2)} per seat`;
+
+            return (
+              <li key={event.id} className={styles.card}>
+                <Link href={`/events/${event.id}`} className={styles.cardLink}>
+                  {event.coverImageUrl ? (
+                    <img
+                      src={event.coverImageUrl}
+                      alt={event.name}
+                      className={styles.cardImage}
+                    />
+                  ) : (
+                    <div className={styles.cardImagePlaceholder} aria-hidden="true" />
+                  )}
+                  <div className={styles.cardBody}>
+                    <p className={styles.cardName}>{event.name}</p>
+                    <p className={styles.cardMeta}>{formattedDate}</p>
+                    <p className={styles.cardPrice}>{formattedPrice}</p>
+                  </div>
+                </Link>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }
