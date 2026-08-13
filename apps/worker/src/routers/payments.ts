@@ -10,9 +10,28 @@ export const paymentsRouter = {
     .input(z.object({
       holdId: z.string().uuid(),
       eventId: z.string(),
-      seatCount: z.number().min(1).max(10),
     }))
     .mutation(async ({ input, ctx }) => {
+      const doId = ctx.env.SEAT_LEDGER.idFromName(input.eventId);
+      const stub = ctx.env.SEAT_LEDGER.get(doId);
+      const hold = await stub.getHold(input.holdId);
+
+      if (!hold) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Hold not found or expired' });
+      }
+
+      if (hold.userId !== ctx.userId) {
+        throw new TRPCError({ code: 'FORBIDDEN', message: 'This hold does not belong to you' });
+      }
+
+      if (hold.status !== 'pending') {
+        throw new TRPCError({ code: 'CONFLICT', message: 'Hold is no longer valid' });
+      }
+
+      if (Date.now() > hold.expiresAt) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Hold has expired' });
+      }
+
       const [event] = await ctx.db
         .select({ id: events.id, name: events.name, pricePerSeat: events.pricePerSeat })
         .from(events)
@@ -26,6 +45,9 @@ export const paymentsRouter = {
         httpClient: Stripe.createFetchHttpClient(),
       });
 
+      // seatCount is derived from the hold, never accepted from the client — see CRITICAL_FINDINGS.md.
+      const seatCount = hold.seatCount;
+
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
         line_items: [
@@ -35,10 +57,10 @@ export const paymentsRouter = {
               unit_amount: event.pricePerSeat,
               product_data: {
                 name: event.name,
-                description: `${input.seatCount} seat(s) for ${event.name}`,
+                description: `${seatCount} seat(s) for ${event.name}`,
               },
             },
-            quantity: input.seatCount,
+            quantity: seatCount,
           },
         ],
         payment_intent_data: {
