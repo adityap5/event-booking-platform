@@ -13,28 +13,6 @@ import styles from './dashboard.module.css';
 export default function DashboardPage() {
   const { userId, orgId, getToken } = useAuth();
   const { organization, isLoaded } = useOrganization();
-  const [whoamiResult, setWhoamiResult] = useState<string>('');
-  const [loading, setLoading] = useState(false);
-
-  const handleFetchToken = async () => {
-    const token = await getToken();
-    console.log('Clerk JWT:', token);
-  };
-
-  const handleTestTrpc = async () => {
-    setLoading(true);
-    setWhoamiResult('Loading...');
-    try {
-      const trpc = createAuthenticatedTRPCClient(getToken);
-      // Hovering over `whoami.query` proves type inference works!
-      const result = await trpc.whoami.query();
-      setWhoamiResult(JSON.stringify(result, null, 2));
-    } catch (error: any) {
-      setWhoamiResult('Error: ' + error.message);
-    } finally {
-      setLoading(false);
-    }
-  };
 
   // ---- My Bookings (attendee view only) ----
   type Booking = {
@@ -165,31 +143,6 @@ export default function DashboardPage() {
           </div>
         </div>
       )}
-
-      <div style={{ marginTop: '3rem', paddingTop: '2rem', borderTop: '1px solid #eaeaea' }}>
-        <h3>Developer Tools</h3>
-        <div style={{ marginTop: '1rem', display: 'flex', gap: '1rem' }}>
-          <button onClick={handleFetchToken}>Log JWT to Console</button>
-          <button onClick={handleTestTrpc} disabled={loading}>
-            Test tRPC whoami
-          </button>
-        </div>
-
-        {whoamiResult && (
-          <pre
-            style={{
-              marginTop: '1rem',
-              padding: '1rem',
-              backgroundColor: '#f5f5f5',
-              borderRadius: '4px',
-              color: '#333',
-              overflowX: 'auto',
-            }}
-          >
-            {whoamiResult}
-          </pre>
-        )}
-      </div>
       </div>
     </RequireAuth>
   );

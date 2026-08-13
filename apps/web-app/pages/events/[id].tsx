@@ -107,7 +107,6 @@ export default function EventPage({
       const { sessionUrl } = await trpc.createCheckoutSession.mutate({
         holdId: reservationId,
         eventId: event.id,
-        seatCount,
       });
 
       if (sessionUrl) {
