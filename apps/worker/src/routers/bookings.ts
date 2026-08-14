@@ -130,7 +130,10 @@ export const bookingsRouter = {
       if (existingAttendee) {
         return existingAttendee;
       }
-      throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: err.message });
+      // Log detail server-side, return generic message — the error formatter only strips
+      // stack traces, not message content, so raw exception text must never be passed through directly.
+      console.error('[ensureAttendee] Failed to create attendee record:', err);
+      throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to create attendee profile' });
     }
   }),
 
