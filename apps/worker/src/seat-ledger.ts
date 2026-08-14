@@ -95,12 +95,21 @@ export class SeatLedger extends DurableObject {
     }
 
     // caps concurrent pending holds per user to prevent a single user from holding an unbounded number of seats across repeated reserveSeat calls without ever paying
+    // expires_at > ? excludes rows that have expired but not yet been swept by
+    // the DO alarm's cleanup pass — an expired pending hold must not count
+    // against the user's active-hold limit while it's waiting to be released.
     const pendingHolds = this.ctx.storage.sql.exec(
       "SELECT COUNT(*) as count FROM reservations WHERE user_id = ? AND status = 'pending' AND expires_at > ?",
       userId,
       Date.now()
     ).toArray();
     const pendingCount = (pendingHolds[0]!.count as number) || 0;
+    // Reject-on-duplicate, not auto-replace: chosen for simplicity and
+    // predictability over a friendlier "release their old hold and retry"
+    // flow. Known trade-off: there is currently no user-facing way to
+    // release a held reservation early (see CRITICAL_FINDINGS.md #5), so a
+    // user who wants to change their seat count must wait out the 15-minute
+    // expiry.
     if (pendingCount >= 1) {
       throw new Error("TOO_MANY_PENDING_HOLDS");
     }

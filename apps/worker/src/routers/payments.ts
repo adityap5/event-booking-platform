@@ -20,6 +20,10 @@ export const paymentsRouter = {
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Hold not found or expired' });
       }
 
+      // Ownership is checked immediately after existence, before status/expiry —
+      // checking status or expiry first would let a FORBIDDEN response leak
+      // whether another user's hold is pending, confirmed, or expired, even
+      // without exposing its contents.
       if (hold.userId !== ctx.userId) {
         throw new TRPCError({ code: 'FORBIDDEN', message: 'This hold does not belong to you' });
       }

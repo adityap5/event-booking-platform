@@ -69,6 +69,9 @@ export const bookingsRouter = {
       } catch (err: unknown) {
   const message = err instanceof Error ? err.message : 'Unknown error';
 
+  // CONFLICT, not BAD_REQUEST: the request itself is well-formed — the
+  // problem is that a live pending hold already exists for this user and
+  // event, which is a state conflict, not an invalid request.
   if (message === 'TOO_MANY_PENDING_HOLDS') {
     throw new TRPCError({
       code: 'CONFLICT',
