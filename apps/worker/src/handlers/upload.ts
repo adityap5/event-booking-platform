@@ -1,5 +1,5 @@
 import { verifyToken } from '@clerk/backend';
-import { resolveAllowedOrigin, ALLOWED_ORIGINS } from '../cors.js';
+import { resolveAllowedOrigin, JWT_AUTHORIZED_PARTIES } from '../cors.js';
 import type { Env } from '../index.js';
 
 export async function handleUpload(request: Request, env: Env): Promise<Response | null> {
@@ -30,7 +30,7 @@ export async function handleUpload(request: Request, env: Env): Promise<Response
     try {
       verifiedToken = await verifyToken(token, {
         jwtKey: env.CLERK_JWT_KEY,
-        authorizedParties: ALLOWED_ORIGINS,
+        authorizedParties: JWT_AUTHORIZED_PARTIES,
       });
     } catch {
       return new Response('Unauthorized', { status: 401 });

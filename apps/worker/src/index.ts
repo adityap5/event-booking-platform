@@ -26,7 +26,7 @@ export type Env = {
   RATE_LIMITER: DurableObjectNamespace; 
 };
 
-import { resolveAllowedOrigin, ALLOWED_ORIGINS } from './cors.js';
+import { resolveAllowedOrigin, JWT_AUTHORIZED_PARTIES } from './cors.js';
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -62,7 +62,7 @@ export default {
         createContext({
           ...opts,
           clerkJwtKey: env.CLERK_JWT_KEY,
-          authorizedParties: ALLOWED_ORIGINS,
+          authorizedParties: JWT_AUTHORIZED_PARTIES,
           db: drizzle(env.DB, { schema }),
           env,
         }),
