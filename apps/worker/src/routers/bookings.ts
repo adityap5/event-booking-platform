@@ -37,7 +37,18 @@ export const bookingsRouter = {
     }),
 
   reserveSeat: workerProcedure
-    .input(z.object({ eventId: z.string(), seatCount: z.number().min(1).max(10) }))
+    .input(
+      z.object({
+        eventId: z.string(),
+        // Without .int(), a client can request a fractional seat count (e.g. 1.5).
+        // The SeatLedger Durable Object stores seatCount directly into SQLite and later runs
+        // SUM(seat_count) across all reservations to compute available seats — a fractional value
+        // corrupts that arithmetic, which is the exact invariant the DO's concurrency guarantee
+        // depends on. totalSeats in createEvent (same codebase, events.ts) already correctly
+        // uses .int() — this brings seatCount in line with that existing pattern, it isn't a new convention.
+        seatCount: z.number().int().min(1).max(10),
+      })
+    )
     .mutation(async ({ input, ctx }) => {
       // Rate limit: 10 reservation attempts per userId per 60 seconds
       const rateLimiter = ctx.env.RATE_LIMITER.get(ctx.env.RATE_LIMITER.idFromName(ctx.userId));

@@ -130,7 +130,8 @@ export const eventsRouter = {
       description: z.string().max(2000).optional(),
       date: z.number(),
       totalSeats: z.number().int().min(1).max(100000),
-      pricePerSeat: z.number().int().min(0),
+      // Sanity bound (£100,000.00 stored in cents/pence), not a business rule set in stone.
+      pricePerSeat: z.number().int().min(0).max(100_000_00),
       tempImageKey: z.string().optional(),
     }))
     .mutation(async ({ input, ctx }) => {
