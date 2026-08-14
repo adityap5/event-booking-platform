@@ -2,10 +2,12 @@
   "name": "@event-booking/worker",
   "version": "0.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "build": "tsc --noEmit",
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "test": "vitest run"
   },
   "dependencies": {
     "@clerk/backend": "^3.15.0",
@@ -19,8 +21,10 @@
     "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.21.2",
     "@cloudflare/workers-types": "^4.0.0",
     "typescript": "^5.8.0",
+    "vitest": "^4.1.10",
     "wrangler": "^4.65.0"
   }
 }
