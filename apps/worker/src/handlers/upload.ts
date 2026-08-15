@@ -37,6 +37,13 @@ export async function handleUpload(request: Request, env: Env): Promise<Response
     }
     const userId = verifiedToken.sub;
 
+    // Rate limit: 5 cover image uploads per userId per 60 seconds (tighter limit to protect R2 storage from flood uploads)
+    const rateLimiter = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(userId));
+    const { allowed } = await rateLimiter.checkLimit('uploadEventCover', 5, 60_000);
+    if (!allowed) {
+      return new Response('Too many uploads. Please try again shortly.', { status: 429 });
+    }
+
     // Parse multipart form data
     const formData = await request.formData();
     const file = formData.get('file') as File | null;

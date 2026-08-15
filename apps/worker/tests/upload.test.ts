@@ -8,15 +8,16 @@ vi.mock('@clerk/backend', async (importOriginal) => {
   return {
     ...actual,
     verifyToken: vi.fn(async (token: string) => {
-      if (token === 'valid-test-token') {
-        return { sub: 'user_upload_test_123' };
+      if (token.startsWith('valid-test-token')) {
+        const sub = token === 'valid-test-token' ? 'user_upload_test_123' : token.replace('valid-test-token-', 'user_upload_test_');
+        return { sub };
       }
       throw new Error('Invalid token');
     }),
   };
 });
 
-describe('handleUpload HTTP handler magic byte inspection', () => {
+describe('handleUpload HTTP handler magic byte inspection & rate limiting', () => {
   const workerEnv = env as unknown as Env;
 
   const validJpegBytes = Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01]);
@@ -51,7 +52,7 @@ describe('handleUpload HTTP handler magic byte inspection', () => {
 
   it('rejects upload with 400 when file.type is image/jpeg but actual bytes are non-image plain text', async () => {
     const textBytes = Buffer.from('this is plain text pretending to be a jpeg image');
-    const req = await createUploadRequest(textBytes, 'fake.jpg', 'image/jpeg');
+    const req = await createUploadRequest(textBytes, 'fake.jpg', 'image/jpeg', 'valid-test-token-text');
 
     const res = await handleUpload(req, workerEnv);
 
@@ -61,13 +62,13 @@ describe('handleUpload HTTP handler magic byte inspection', () => {
   });
 
   it('accepts upload with correct JPEG magic bytes and image/jpeg file.type, storing image/jpeg in R2', async () => {
-    const req = await createUploadRequest(validJpegBytes, 'photo.jpg', 'image/jpeg');
+    const req = await createUploadRequest(validJpegBytes, 'photo.jpg', 'image/jpeg', 'valid-test-token-jpeg');
 
     const res = await handleUpload(req, workerEnv);
 
     expect(res?.status).toBe(200);
     const json = (await res?.json()) as { tempImageKey: string };
-    expect(json.tempImageKey).toMatch(/^uploads\/tmp\/user_upload_test_123\/[a-f0-9-]+\.jpg$/);
+    expect(json.tempImageKey).toMatch(/^uploads\/tmp\/user_upload_test_jpeg\/[a-f0-9-]+\.jpg$/);
 
     const storedObject = await workerEnv.EVENT_COVERS.get(json.tempImageKey);
     expect(storedObject).not.toBeNull();
@@ -75,14 +76,14 @@ describe('handleUpload HTTP handler magic byte inspection', () => {
   });
 
   it('stores derived type (image/jpeg) in R2 even when client claims wrong file.type (image/png)', async () => {
-    const req = await createUploadRequest(validJpegBytes, 'photo.png', 'image/png');
+    const req = await createUploadRequest(validJpegBytes, 'photo.png', 'image/png', 'valid-test-token-wrongtype');
 
     const res = await handleUpload(req, workerEnv);
 
     expect(res?.status).toBe(200);
     const json = (await res?.json()) as { tempImageKey: string };
 
-    expect(json.tempImageKey).toMatch(/^uploads\/tmp\/user_upload_test_123\/[a-f0-9-]+\.jpg$/);
+    expect(json.tempImageKey).toMatch(/^uploads\/tmp\/user_upload_test_wrongtype\/[a-f0-9-]+\.jpg$/);
 
     const storedObject = await workerEnv.EVENT_COVERS.get(json.tempImageKey);
     expect(storedObject).not.toBeNull();
@@ -90,28 +91,45 @@ describe('handleUpload HTTP handler magic byte inspection', () => {
   });
 
   it('accepts valid PNG bytes and stores image/png in R2', async () => {
-    const req = await createUploadRequest(validPngBytes, 'graphic.png', 'image/png');
+    const req = await createUploadRequest(validPngBytes, 'graphic.png', 'image/png', 'valid-test-token-png');
 
     const res = await handleUpload(req, workerEnv);
 
     expect(res?.status).toBe(200);
     const json = (await res?.json()) as { tempImageKey: string };
-    expect(json.tempImageKey).toMatch(/^uploads\/tmp\/user_upload_test_123\/[a-f0-9-]+\.png$/);
+    expect(json.tempImageKey).toMatch(/^uploads\/tmp\/user_upload_test_png\/[a-f0-9-]+\.png$/);
 
     const storedObject = await workerEnv.EVENT_COVERS.get(json.tempImageKey);
     expect(storedObject?.httpMetadata?.contentType).toBe('image/png');
   });
 
   it('accepts valid WebP bytes and stores image/webp in R2', async () => {
-    const req = await createUploadRequest(validWebpBytes, 'graphic.webp', 'image/webp');
+    const req = await createUploadRequest(validWebpBytes, 'graphic.webp', 'image/webp', 'valid-test-token-webp');
 
     const res = await handleUpload(req, workerEnv);
 
     expect(res?.status).toBe(200);
     const json = (await res?.json()) as { tempImageKey: string };
-    expect(json.tempImageKey).toMatch(/^uploads\/tmp\/user_upload_test_123\/[a-f0-9-]+\.webp$/);
+    expect(json.tempImageKey).toMatch(/^uploads\/tmp\/user_upload_test_webp\/[a-f0-9-]+\.webp$/);
 
     const storedObject = await workerEnv.EVENT_COVERS.get(json.tempImageKey);
     expect(storedObject?.httpMetadata?.contentType).toBe('image/webp');
+  });
+
+  it('rate limiting: allows 5 uploads per 60s window for a user, then rejects 6th with 429', async () => {
+    const rateLimitToken = 'valid-test-token-ratelimit';
+
+    for (let i = 0; i < 5; i++) {
+      const req = await createUploadRequest(validJpegBytes, `photo_${i}.jpg`, 'image/jpeg', rateLimitToken);
+      const res = await handleUpload(req, workerEnv);
+      expect(res?.status).toBe(200);
+    }
+
+    const req6 = await createUploadRequest(validJpegBytes, 'photo_6.jpg', 'image/jpeg', rateLimitToken);
+    const res6 = await handleUpload(req6, workerEnv);
+
+    expect(res6?.status).toBe(429);
+    const body6 = await res6?.text();
+    expect(body6).toBe('Too many uploads. Please try again shortly.');
   });
 });

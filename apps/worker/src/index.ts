@@ -23,7 +23,7 @@ export type Env = {
   SEAT_LEDGER: DurableObjectNamespace<SeatLedger>;
   EVENT_COVERS: R2Bucket;        
   EVENT_CACHE: KVNamespace;  
-  RATE_LIMITER: DurableObjectNamespace; 
+  RATE_LIMITER: DurableObjectNamespace<RateLimiter>; 
 };
 
 import { resolveAllowedOrigin, JWT_AUTHORIZED_PARTIES } from './cors.js';
