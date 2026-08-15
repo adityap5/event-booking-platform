@@ -1,5 +1,6 @@
 import { Webhook } from 'svix';
 import { drizzle } from 'drizzle-orm/d1';
+import { eq } from 'drizzle-orm';
 import * as schema from '@event-booking/shared';
 import type { Env } from '../index.js';
 
@@ -47,9 +48,28 @@ export async function handleClerkWebhook(request: Request, env: Env): Promise<Re
           ownerId: evt.data.created_by,
           // Clerk returns created_at as milliseconds, our schema expects a Date object because mode='timestamp'
           createdAt: evt.data.created_at ? new Date(evt.data.created_at) : new Date(),
-        }).onConflictDoNothing();
+        });
         console.log(`Successfully synced organisation ${evt.data.id} to D1`);
       } catch (err: any) {
+        const errorMessage = String(err?.cause?.message ?? err?.message ?? err);
+        const isOwnerConflict = errorMessage.includes('organisations.owner_id') || errorMessage.includes('org_owner_idx');
+
+        if (isOwnerConflict) {
+          const [existingOrg] = await db
+            .select({ id: schema.organisations.id })
+            .from(schema.organisations)
+            .where(eq(schema.organisations.ownerId, evt.data.created_by));
+
+          // This is a permanent violation of the one-org-per-user model, retrying achieves nothing,
+          // so we acknowledge receipt (HTTP 200) but log loudly for manual follow-up.
+          console.error('[ORG_OWNER_CONFLICT]', {
+            existingOrgId: existingOrg?.id ?? 'unknown',
+            newOrgId: evt.data.id,
+            ownerId: evt.data.created_by,
+          });
+          return new Response('', { status: 200 });
+        }
+
         console.error('Error inserting organisation to DB:', err);
         console.error('Error cause:', err.cause);
         console.error('Error stack:', err.stack);
