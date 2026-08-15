@@ -22,6 +22,7 @@ interface CreateContextOptions extends FetchCreateContextFnOptions {
 
 export async function createContext(opts: CreateContextOptions) {
   const { req, clerkJwtKey, authorizedParties, db, env } = opts;
+  const ip = req.headers.get('CF-Connecting-IP') ?? 'unknown-ip';
   
   // 1. Read the Authorization header from the incoming request
   const authHeader = req.headers.get('Authorization');
@@ -30,6 +31,7 @@ export async function createContext(opts: CreateContextOptions) {
       userId: undefined,
       orgId: undefined,
       role: undefined,
+      ip,
       db,
       env,
     };
@@ -41,6 +43,7 @@ export async function createContext(opts: CreateContextOptions) {
       userId: undefined,
       orgId: undefined,
       role: undefined,
+      ip,
       db,
       env,
     };
@@ -67,13 +70,14 @@ export async function createContext(opts: CreateContextOptions) {
 
     const claims = verifiedClaims as unknown as V2Claims;
 
-    // 3. Return verified claims: userId, orgId, role
+    // 3. Return verified claims: userId, orgId, role, ip
     return {
       userId: claims.sub,
       // In Clerk's v2 session token format, organization data is nested under the 'o' object.
       // If the user has no active organization, the 'o' claim is completely omitted.
       orgId: claims.o?.id,
       role: claims.o?.rol,
+      ip,
       db,
       env,
     };

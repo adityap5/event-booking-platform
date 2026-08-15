@@ -107,6 +107,13 @@ export async function handleUpload(request: Request, env: Env): Promise<Response
 
   // Serve R2 cover images publicly — no auth required, images are public by design
   if (url.pathname.startsWith('/images/')) {
+    const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown-ip';
+    const rateLimiter = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(ip));
+    const { allowed } = await rateLimiter.checkLimit('publicImageRead', 120, 60_000);
+    if (!allowed) {
+      return new Response('Too many requests. Please try again shortly.', { status: 429 });
+    }
+
     const key = url.pathname.slice('/images/'.length);
     if (!key) {
       return new Response('Not Found', { status: 404 });

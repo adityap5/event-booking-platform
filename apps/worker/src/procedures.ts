@@ -1,4 +1,5 @@
 import { protectedProcedure, publicProcedure } from '@event-booking/trpc';
+import { TRPCError } from '@trpc/server';
 import type { R2Bucket } from '@cloudflare/workers-types';
 
 export interface WorkerEnv {
@@ -41,11 +42,26 @@ export const workerProcedure = protectedProcedure.use(({ next, ctx }) => {
   });
 });
 
-export const publicWorkerProcedure = publicProcedure.use(({ next, ctx }) => {
+export const publicWorkerProcedure = publicProcedure.use(async ({ next, ctx }) => {
+  const env = ctx.env as WorkerEnv;
+  const ip = ctx.ip ?? 'unknown-ip';
+
+  // Shared rate limit across all unauthenticated public tRPC procedures ('publicRead').
+  // Uses a single combined budget (60 req / 60s per IP) so clients rotating between endpoints
+  // cannot multiply their allowed quota.
+  const rateLimiter = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(ip));
+  const { allowed } = await rateLimiter.checkLimit('publicRead', 60, 60_000);
+  if (!allowed) {
+    throw new TRPCError({
+      code: 'TOO_MANY_REQUESTS',
+      message: 'Too many requests. Please try again shortly.',
+    });
+  }
+
   return next({
     ctx: {
       ...ctx,
-      env: ctx.env as WorkerEnv,
+      env,
     }
   });
 });
