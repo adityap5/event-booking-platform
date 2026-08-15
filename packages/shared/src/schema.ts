@@ -91,8 +91,8 @@ export const bookings = sqliteTable(
       index('booking_event_idx').on(table.eventId),
       // Look up all bookings for a specific attendee (user view)
       index('booking_attendee_idx').on(table.attendeeId),
-      // Fast lookup for Stripe webhooks to confirm payments
-      index('booking_stripe_idx').on(table.stripePaymentIntentId),
+      // Fast lookup by holdId for seat confirmation in bookings.ts router and stripe-webhook.ts handler
+      index('booking_hold_idx').on(table.holdId),
     ];
   }
 );
