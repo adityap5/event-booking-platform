@@ -44,27 +44,49 @@ export async function handleUpload(request: Request, env: Env): Promise<Response
       return new Response('Missing file', { status: 400 });
     }
 
-    // Server-side file validation — check the Content-Type of the file part
-    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
-    if (!allowedTypes.includes(file.type)) {
-      return new Response('Invalid file type. Allowed: jpeg, png, webp', { status: 400 });
-    }
     const MAX_SIZE = 5 * 1024 * 1024; // 5MB
     if (file.size > MAX_SIZE) {
       return new Response('File too large. Maximum 5MB', { status: 400 });
     }
 
+    const buffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+
+    // Content-type is derived from actual file bytes, never trusted from the client — file.type is a client-declared
+    // header we don't control, and previously flowed all the way through to the response Content-Type served back on every /images/* request.
+    let detectedType: string | null = null;
+    let ext = '';
+
+    if (bytes.length >= 3 && bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) {
+      detectedType = 'image/jpeg';
+      ext = 'jpg';
+    } else if (
+      bytes.length >= 8 &&
+      bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47 &&
+      bytes[4] === 0x0D && bytes[5] === 0x0A && bytes[6] === 0x1A && bytes[7] === 0x0A
+    ) {
+      detectedType = 'image/png';
+      ext = 'png';
+    } else if (
+      bytes.length >= 12 &&
+      bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+      bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
+    ) {
+      detectedType = 'image/webp';
+      ext = 'webp';
+    }
+
+    if (!detectedType) {
+      return new Response('File content does not match a supported image format', { status: 400 });
+    }
+
     // Temporary R2 key — scoped to the uploading user, never exposes the original filename
-    const ext = file.type === 'image/jpeg' ? 'jpg'
-              : file.type === 'image/png'  ? 'png'
-              : 'webp';
     const tempId = crypto.randomUUID();
     const key = `uploads/tmp/${userId}/${tempId}.${ext}`;
 
     // Upload to R2
-    const buffer = await file.arrayBuffer();
     await env.EVENT_COVERS.put(key, buffer, {
-      httpMetadata: { contentType: file.type },
+      httpMetadata: { contentType: detectedType },
     });
 
     return new Response(JSON.stringify({ tempImageKey: key }), {

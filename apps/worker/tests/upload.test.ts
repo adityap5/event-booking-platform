@@ -1,0 +1,117 @@
+import { describe, it, expect, vi } from 'vitest';
+import { env } from 'cloudflare:test';
+import type { Env } from '../src/index.js';
+import { handleUpload } from '../src/handlers/upload.js';
+
+vi.mock('@clerk/backend', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@clerk/backend')>();
+  return {
+    ...actual,
+    verifyToken: vi.fn(async (token: string) => {
+      if (token === 'valid-test-token') {
+        return { sub: 'user_upload_test_123' };
+      }
+      throw new Error('Invalid token');
+    }),
+  };
+});
+
+describe('handleUpload HTTP handler magic byte inspection', () => {
+  const workerEnv = env as unknown as Env;
+
+  const validJpegBytes = Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01]);
+  const validPngBytes = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D]);
+  const validWebpBytes = Buffer.from([
+    0x52, 0x49, 0x46, 0x46, // "RIFF"
+    0x1C, 0x00, 0x00, 0x00, // 4-byte size field
+    0x57, 0x45, 0x42, 0x50, // "WEBP"
+  ]);
+
+  async function createUploadRequest(
+    fileBuffer: Uint8Array,
+    fileName: string,
+    claimedContentType: string,
+    token = 'valid-test-token'
+  ): Promise<Request> {
+    const file = new File([fileBuffer], fileName, { type: claimedContentType });
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+
+    return new Request('https://worker.dev/upload/event-cover', {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+  }
+
+  it('rejects upload with 400 when file.type is image/jpeg but actual bytes are non-image plain text', async () => {
+    const textBytes = Buffer.from('this is plain text pretending to be a jpeg image');
+    const req = await createUploadRequest(textBytes, 'fake.jpg', 'image/jpeg');
+
+    const res = await handleUpload(req, workerEnv);
+
+    expect(res?.status).toBe(400);
+    const body = await res?.text();
+    expect(body).toBe('File content does not match a supported image format');
+  });
+
+  it('accepts upload with correct JPEG magic bytes and image/jpeg file.type, storing image/jpeg in R2', async () => {
+    const req = await createUploadRequest(validJpegBytes, 'photo.jpg', 'image/jpeg');
+
+    const res = await handleUpload(req, workerEnv);
+
+    expect(res?.status).toBe(200);
+    const json = (await res?.json()) as { tempImageKey: string };
+    expect(json.tempImageKey).toMatch(/^uploads\/tmp\/user_upload_test_123\/[a-f0-9-]+\.jpg$/);
+
+    const storedObject = await workerEnv.EVENT_COVERS.get(json.tempImageKey);
+    expect(storedObject).not.toBeNull();
+    expect(storedObject?.httpMetadata?.contentType).toBe('image/jpeg');
+  });
+
+  it('stores derived type (image/jpeg) in R2 even when client claims wrong file.type (image/png)', async () => {
+    const req = await createUploadRequest(validJpegBytes, 'photo.png', 'image/png');
+
+    const res = await handleUpload(req, workerEnv);
+
+    expect(res?.status).toBe(200);
+    const json = (await res?.json()) as { tempImageKey: string };
+
+    expect(json.tempImageKey).toMatch(/^uploads\/tmp\/user_upload_test_123\/[a-f0-9-]+\.jpg$/);
+
+    const storedObject = await workerEnv.EVENT_COVERS.get(json.tempImageKey);
+    expect(storedObject).not.toBeNull();
+    expect(storedObject?.httpMetadata?.contentType).toBe('image/jpeg');
+  });
+
+  it('accepts valid PNG bytes and stores image/png in R2', async () => {
+    const req = await createUploadRequest(validPngBytes, 'graphic.png', 'image/png');
+
+    const res = await handleUpload(req, workerEnv);
+
+    expect(res?.status).toBe(200);
+    const json = (await res?.json()) as { tempImageKey: string };
+    expect(json.tempImageKey).toMatch(/^uploads\/tmp\/user_upload_test_123\/[a-f0-9-]+\.png$/);
+
+    const storedObject = await workerEnv.EVENT_COVERS.get(json.tempImageKey);
+    expect(storedObject?.httpMetadata?.contentType).toBe('image/png');
+  });
+
+  it('accepts valid WebP bytes and stores image/webp in R2', async () => {
+    const req = await createUploadRequest(validWebpBytes, 'graphic.webp', 'image/webp');
+
+    const res = await handleUpload(req, workerEnv);
+
+    expect(res?.status).toBe(200);
+    const json = (await res?.json()) as { tempImageKey: string };
+    expect(json.tempImageKey).toMatch(/^uploads\/tmp\/user_upload_test_123\/[a-f0-9-]+\.webp$/);
+
+    const storedObject = await workerEnv.EVENT_COVERS.get(json.tempImageKey);
+    expect(storedObject?.httpMetadata?.contentType).toBe('image/webp');
+  });
+});
