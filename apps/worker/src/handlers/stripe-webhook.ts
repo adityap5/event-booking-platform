@@ -121,10 +121,9 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
               bookingId: booking.id,
               totalPaidPence: paymentIntent.amount_received,
             });
-            await dispatchCalendarInvite({
+            await dispatchCalendarInvite({ // organizerEmail intentionally omitted — no organiser-email lookup exists yet. See CalendarInvitePayload in integrations.ts.
               idempotencyKey: holdId,
               attendeeEmail: attendee.email,
-              organizerEmail: 'organiser@example.com', // stub: replace with real organiser lookup
               eventName: eventId,
               eventDate: Date.now(),
               durationMinutes: 120,

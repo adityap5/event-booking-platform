@@ -39,9 +39,6 @@ export async function handleClerkWebhook(request: Request, env: Env): Promise<Re
     if (evt.type === 'organization.created') {
       const db = drizzle(env.DB, { schema });
       try {
-        console.log('Webhook organization.created_at raw value:', evt.data.created_at);
-        console.log('Webhook organization.created_at typeof:', typeof evt.data.created_at);
-        
         await db.insert(schema.organisations).values({
           id: evt.data.id,
           name: evt.data.name,

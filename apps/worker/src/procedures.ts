@@ -1,14 +1,14 @@
 import { protectedProcedure, publicProcedure } from '@event-booking/trpc';
 import { TRPCError } from '@trpc/server';
-import type { R2Bucket } from '@cloudflare/workers-types';
+import type { R2Bucket, DurableObjectId } from '@cloudflare/workers-types';
 
 export interface WorkerEnv {
   CLERK_SECRET_KEY: string;
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;  
   SEAT_LEDGER: {
-    idFromName: (name: string) => any;
-    get: (id: any) => {
+    idFromName: (name: string) => DurableObjectId;
+    get: (id: DurableObjectId) => {
       getAvailableSeats: () => Promise<number | null>;
       initialize: (seats: number) => Promise<void>;
       reserveSeat: (userId: string, seats: number) => Promise<{ reservationId: string; expiresAt: number }>;
@@ -24,8 +24,8 @@ export interface WorkerEnv {
     delete: (key: string) => Promise<void>;
   };
   RATE_LIMITER: {
-    idFromName: (name: string) => any;
-    get: (id: any) => {
+    idFromName: (name: string) => DurableObjectId;
+    get: (id: DurableObjectId) => {
       checkLimit: (action: string, limit: number, windowMs: number) => Promise<{ allowed: boolean; remaining: number }>;
     };
   };

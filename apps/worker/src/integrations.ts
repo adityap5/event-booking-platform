@@ -41,7 +41,7 @@ export async function dispatchEmailConfirmation(
 export interface CalendarInvitePayload {
   idempotencyKey: string;   // bookingId
   attendeeEmail: string;    // attendee email for invite
-  organizerEmail: string;   // event organiser email
+  organizerEmail?: string;  // event organiser email (optional until organiser lookup is implemented)
   eventName: string;
   eventDate: number;        // unix timestamp ms
   durationMinutes: number;  // default 120 if unknown
