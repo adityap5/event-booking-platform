@@ -1,0 +1,3 @@
+# Advisory only; not an access-control mechanism.
+User-agent: *
+Allow: /
