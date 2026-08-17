@@ -183,4 +183,61 @@ describe('paymentsRouter.createCheckoutSession', () => {
       stripeMock.restore();
     }
   });
+
+  it('rate limit: permits 10 createCheckoutSession calls per user, 11th rejected with TOO_MANY_REQUESTS', async () => {
+    const callerUserA = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-rate-limit-checkout-A',
+    });
+
+    const fakeHoldId = crypto.randomUUID();
+    const fakeEventId = 'test-event-rate-limit';
+
+    // First 10 calls for User A pass rate limiter (fail with NOT_FOUND because hold does not exist, but pass rate limiter)
+    for (let i = 0; i < 10; i++) {
+      await expect(
+        callerUserA.createCheckoutSession({ holdId: fakeHoldId, eventId: fakeEventId })
+      ).rejects.toThrowError(/Hold not found or expired/);
+    }
+
+    // 11th call for User A must be rejected by RateLimiter with TOO_MANY_REQUESTS
+    await expect(
+      callerUserA.createCheckoutSession({ holdId: fakeHoldId, eventId: fakeEventId })
+    ).rejects.toThrowError('Too many requests. Please try again shortly.');
+  });
+
+  it('rate limit per-user isolation: User B is not blocked when User A hits rate limit', async () => {
+    const callerUserA = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-rate-limit-iso-A',
+    });
+
+    const callerUserB = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-rate-limit-iso-B',
+    });
+
+    const fakeHoldId = crypto.randomUUID();
+    const fakeEventId = 'test-event-rate-limit-iso';
+
+    // User A consumes all 10 slots
+    for (let i = 0; i < 10; i++) {
+      await expect(
+        callerUserA.createCheckoutSession({ holdId: fakeHoldId, eventId: fakeEventId })
+      ).rejects.toThrowError(/Hold not found or expired/);
+    }
+
+    // 11th call for User A is rate limited
+    await expect(
+      callerUserA.createCheckoutSession({ holdId: fakeHoldId, eventId: fakeEventId })
+    ).rejects.toThrowError('Too many requests. Please try again shortly.');
+
+    // User B's call is NOT rate-limited (fails with NOT_FOUND hold check instead of TOO_MANY_REQUESTS)
+    await expect(
+      callerUserB.createCheckoutSession({ holdId: fakeHoldId, eventId: fakeEventId })
+    ).rejects.toThrowError(/Hold not found or expired/);
+  });
 });

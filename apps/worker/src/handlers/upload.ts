@@ -45,7 +45,14 @@ export async function handleUpload(request: Request, env: Env): Promise<Response
     }
 
     // Parse multipart form data
-    const formData = await request.formData();
+    // request.formData() throws on a malformed multipart body — without this, that becomes an uncaught exception instead of a clean 400, since nothing upstream in index.ts catches it either.
+    let formData: FormData;
+    try {
+      formData = await request.formData();
+    } catch {
+      return new Response('Malformed request body', { status: 400 });
+    }
+
     const file = formData.get('file') as File | null;
     if (file === null) {
       return new Response('Missing file', { status: 400 });

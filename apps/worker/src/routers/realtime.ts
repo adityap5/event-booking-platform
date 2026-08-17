@@ -8,6 +8,16 @@ export const realtimeRouter = {
   createSocketTicket: workerProcedure
     .input(z.object({ eventId: z.string() }))
     .mutation(async ({ input, ctx }) => {
+      // Rate limit ticket minting per user to protect DO resources (10 requests per 60s)
+      const rateLimiter = ctx.env.RATE_LIMITER.get(ctx.env.RATE_LIMITER.idFromName(ctx.userId));
+      const { allowed } = await rateLimiter.checkLimit('createSocketTicket', 10, 60_000);
+      if (!allowed) {
+        throw new TRPCError({
+          code: 'TOO_MANY_REQUESTS',
+          message: 'Too many requests. Please try again shortly.',
+        });
+      }
+
       const stub = ctx.env.SEAT_LEDGER.get(ctx.env.SEAT_LEDGER.idFromName(input.eventId));
 
       const available = await stub.getAvailableSeats();

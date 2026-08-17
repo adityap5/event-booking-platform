@@ -132,4 +132,21 @@ describe('handleUpload HTTP handler magic byte inspection & rate limiting', () =
     const body6 = await res6?.text();
     expect(body6).toBe('Too many uploads. Please try again shortly.');
   });
+
+  it('returns 400 Malformed request body when multipart form data parsing fails', async () => {
+    const malformedReq = new Request('https://worker.dev/upload/event-cover', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer valid-test-token-malformed',
+        'Content-Type': 'multipart/form-data; boundary=---------------------------974767299852498929531610575',
+      },
+      body: 'this is not valid multipart payload -- missing boundaries and headers',
+    });
+
+    const res = await handleUpload(malformedReq, workerEnv);
+
+    expect(res?.status).toBe(400);
+    const body = await res?.text();
+    expect(body).toBe('Malformed request body');
+  });
 });

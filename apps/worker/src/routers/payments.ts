@@ -12,6 +12,16 @@ export const paymentsRouter = {
       eventId: z.string(),
     }))
     .mutation(async ({ input, ctx }) => {
+      // Rate limit checkout session creation per user to prevent Stripe session spamming (10 requests per 60s)
+      const rateLimiter = ctx.env.RATE_LIMITER.get(ctx.env.RATE_LIMITER.idFromName(ctx.userId));
+      const { allowed } = await rateLimiter.checkLimit('createCheckoutSession', 10, 60_000);
+      if (!allowed) {
+        throw new TRPCError({
+          code: 'TOO_MANY_REQUESTS',
+          message: 'Too many requests. Please try again shortly.',
+        });
+      }
+
       const doId = ctx.env.SEAT_LEDGER.idFromName(input.eventId);
       const stub = ctx.env.SEAT_LEDGER.get(doId);
       const hold = await stub.getHold(input.holdId);
