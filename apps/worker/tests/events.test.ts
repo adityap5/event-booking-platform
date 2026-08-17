@@ -57,3 +57,101 @@ describe('Task 5: Per-organisation isolation', () => {
     expect(Array.isArray(attendees)).toBe(true);
   });
 });
+
+describe('Item 1: Defensive role check on createEvent', () => {
+  let db: Awaited<ReturnType<typeof setupTestDb>>;
+  const workerEnv = env as unknown as Env;
+
+  beforeEach(async () => {
+    db = await setupTestDb(workerEnv.DB);
+  });
+
+  it('permitted: org:admin role can create an event successfully', async () => {
+    const adminCaller = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-admin-1',
+      orgId: 'org-1',
+      role: 'org:admin',
+    });
+
+    const event = await adminCaller.createEvent({
+      name: 'Admin Event',
+      date: Date.now() + 86400000,
+      totalSeats: 50,
+      pricePerSeat: 1000,
+    });
+
+    expect(event!.id).toBeDefined();
+    expect(event!.name).toBe('Admin Event');
+  });
+
+  it('denied: non-admin role (org:member) is rejected with FORBIDDEN', async () => {
+    const memberCaller = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-member-1',
+      orgId: 'org-1',
+      role: 'org:member',
+    });
+
+    await expect(
+      memberCaller.createEvent({
+        name: 'Member Event Attempt',
+        date: Date.now() + 86400000,
+        totalSeats: 50,
+        pricePerSeat: 1000,
+      })
+    ).rejects.toThrowError('You do not have permission to perform this action.');
+  });
+
+  it('missing organisation: caller without orgId is rejected with FORBIDDEN', async () => {
+    const noOrgCaller = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-no-org',
+      orgId: null,
+      role: null,
+    });
+
+    await expect(
+      noOrgCaller.createEvent({
+        name: 'No Org Event Attempt',
+        date: Date.now() + 86400000,
+        totalSeats: 50,
+        pricePerSeat: 1000,
+      })
+    ).rejects.toThrowError('You must be an organiser to access this resource.');
+  });
+
+  it('cross-organisation: event is created under caller server-derived orgId, not accessible to other orgs', async () => {
+    const callerOrgA = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-cross-A',
+      orgId: 'org-A-id',
+      role: 'org:admin',
+    });
+
+    const callerOrgB = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-cross-B',
+      orgId: 'org-B-id',
+      role: 'org:admin',
+    });
+
+    const createdByB = await callerOrgB.createEvent({
+      name: 'Org B Event',
+      date: Date.now() + 86400000,
+      totalSeats: 50,
+      pricePerSeat: 1000,
+    });
+
+    const orgAEvents = await callerOrgA.listOrgEvents();
+    expect(orgAEvents.some((e) => e.id === createdByB!.id)).toBe(false);
+
+    const orgBEvents = await callerOrgB.listOrgEvents();
+    expect(orgBEvents.some((e) => e.id === createdByB!.id)).toBe(true);
+  });
+});

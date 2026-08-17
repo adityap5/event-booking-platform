@@ -53,3 +53,23 @@ export function requireActiveOrganisation(ctx: AuthContext): string {
   }
   return ctx.orgId;
 }
+
+/**
+ * Ensures the caller has an active organisation in their context AND holds a specific role.
+ * Use this for sensitive management actions (e.g. creating events) restricted to specific org roles (e.g. 'org:admin').
+ */
+export function requireOrganiserRole(ctx: AuthContext, requiredRole: string): string {
+  if (!ctx.orgId) {
+    throw new TRPCError({
+      code: 'FORBIDDEN',
+      message: 'You must be an organiser to access this resource.',
+    });
+  }
+  if (ctx.role !== requiredRole) {
+    throw new TRPCError({
+      code: 'FORBIDDEN',
+      message: 'You do not have permission to perform this action.',
+    });
+  }
+  return ctx.orgId;
+}

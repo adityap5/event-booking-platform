@@ -59,8 +59,8 @@ export function createTestCaller(opts: TestCallerOptions): ReturnType<typeof app
 
   const ctx: Context = {
     userId: opts.userId ?? 'test-user-1',
-    orgId: opts.orgId ?? 'test-org-1',
-    role: opts.role ?? 'org:admin',
+    orgId: opts.orgId === null ? undefined : (opts.orgId ?? 'test-org-1'),
+    role: opts.role === null ? undefined : (opts.role ?? 'org:admin'),
     ip: opts.ip ?? '127.0.0.1',
     db: opts.db,
     env,

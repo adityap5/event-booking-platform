@@ -1,5 +1,5 @@
 import { protectedProcedure } from '@event-booking/trpc';
-import { requireActiveOrganisation } from '@event-booking/permissions';
+import { requireActiveOrganisation, requireOrganiserRole } from '@event-booking/permissions';
 import { z } from 'zod';
 import * as schema from '@event-booking/shared';
 import { events } from '@event-booking/shared';
@@ -135,7 +135,8 @@ export const eventsRouter = {
       tempImageKey: z.string().optional(),
     }))
     .mutation(async ({ input, ctx }) => {
-      const orgId = requireActiveOrganisation(ctx);
+      // Event creation is restricted to org admins — today this is unreachable (no invite-member feature exists yet, every org has exactly one member), but closing it now avoids it becoming a real gap the moment that feature ships.
+      const orgId = requireOrganiserRole(ctx, 'org:admin');
 
       const rateLimiter = ctx.env.RATE_LIMITER.get(ctx.env.RATE_LIMITER.idFromName(orgId));
       const { allowed } = await rateLimiter.checkLimit('createEvent', 5, 60 * 60_000);
