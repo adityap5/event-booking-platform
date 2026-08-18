@@ -127,8 +127,9 @@ export default {
         }),
     });
 
-    // Append CORS headers to the tRPC response
+    // Append CORS and Cache-Control headers to the tRPC response
     response.headers.set('Access-Control-Allow-Origin', resolveAllowedOrigin(request));
+    response.headers.set('Cache-Control', 'no-store');
     return response;
   },
 } satisfies ExportedHandler<Env>;
