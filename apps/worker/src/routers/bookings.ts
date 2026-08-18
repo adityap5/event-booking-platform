@@ -78,21 +78,20 @@ export const bookingsRouter = {
         const result = await stub.reserveSeat(ctx.userId, input.seatCount);
         return result;
       } catch (err: unknown) {
-  const message = err instanceof Error ? err.message : 'Unknown error';
+  const message = err instanceof Error ? err.message : '';
 
-  // CONFLICT, not BAD_REQUEST: the request itself is well-formed — the
-  // problem is that a live pending hold already exists for this user and
-  // event, which is a state conflict, not an invalid request.
   if (message === 'TOO_MANY_PENDING_HOLDS') {
     throw new TRPCError({
       code: 'CONFLICT',
-      message,
+      message: 'TOO_MANY_PENDING_HOLDS',
     });
   }
 
+  console.error('[reserveSeat] Unexpected error', err);
+
   throw new TRPCError({
-    code: 'BAD_REQUEST',
-    message,
+    code: 'INTERNAL_SERVER_ERROR',
+    message: 'Unable to reserve seats',
   });
 }
     }),

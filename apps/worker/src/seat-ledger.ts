@@ -340,8 +340,7 @@ export class SeatLedger extends DurableObject {
   }
 }
 
-  webSocketClose(_ws: WebSocket, code: number, reason: string): void {
-    console.log('WebSocket closed', { code, reason });
+  webSocketClose(_ws: WebSocket, _code: number, _reason: string): void {
   }
 
   webSocketError(_ws: WebSocket, error: unknown): void {

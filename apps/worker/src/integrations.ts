@@ -26,12 +26,11 @@ export interface EmailConfirmationPayload {
 }
 
 export async function dispatchEmailConfirmation(
-  payload: EmailConfirmationPayload,
+   _payload: EmailConfirmationPayload,
 ): Promise<void> {
   // STUB: Replace with real email provider (Resend, SendGrid, Postmark)
   // Payload schema is stable — swap the implementation without changing callers
   // Idempotency: use payload.idempotencyKey as the provider's idempotency key
-  console.log('[EMAIL STUB] Would send confirmation email:', JSON.stringify(payload));
 }
 
 // ---------------------------------------------------------------------------
@@ -50,10 +49,9 @@ export interface CalendarInvitePayload {
 }
 
 export async function dispatchCalendarInvite(
-  payload: CalendarInvitePayload,
+   _payload: CalendarInvitePayload,
 ): Promise<void> {
   // STUB: Replace with Google Calendar API, iCal generation + email, or Nylas
   // Payload schema is stable — swap the implementation without changing callers
   // Idempotency: use payload.idempotencyKey to deduplicate calendar creates
-  console.log('[CALENDAR STUB] Would send calendar invite:', JSON.stringify(payload));
 }

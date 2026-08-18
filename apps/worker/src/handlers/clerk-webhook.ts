@@ -46,7 +46,6 @@ export async function handleClerkWebhook(request: Request, env: Env): Promise<Re
           // Clerk returns created_at as milliseconds, our schema expects a Date object because mode='timestamp'
           createdAt: evt.data.created_at ? new Date(evt.data.created_at) : new Date(),
         });
-        console.log(`Successfully synced organisation ${evt.data.id} to D1`);
       } catch (err: any) {
         const errorMessage = String(err?.cause?.message ?? err?.message ?? err);
         const isOwnerConflict = errorMessage.includes('organisations.owner_id') || errorMessage.includes('org_owner_idx');
