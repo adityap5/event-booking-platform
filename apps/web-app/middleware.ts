@@ -1,11 +1,12 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
-const CSP_REPORT_ONLY_POLICY = [
+const CSP_POLICY = [
   "default-src 'self'",
   "script-src 'self' https://saved-foxhound-17.clerk.accounts.dev",
+  "worker-src 'self' blob:",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' https://event-booking-worker.aditya29.workers.dev",
+  "img-src 'self' https://event-booking-worker.aditya29.workers.dev https://img.clerk.com",
   "connect-src 'self' https://event-booking-worker.aditya29.workers.dev wss://event-booking-worker.aditya29.workers.dev https://saved-foxhound-17.clerk.accounts.dev",
   "frame-ancestors 'none'",
   "base-uri 'self'",
@@ -45,7 +46,7 @@ export function middleware(request: NextRequest) {
   response.headers.set('X-Content-Type-Options', 'nosniff');
   response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
   response.headers.set('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
-  response.headers.set('Content-Security-Policy-Report-Only', CSP_REPORT_ONLY_POLICY);
+  response.headers.set('Content-Security-Policy', CSP_POLICY);
 
   return response;
 }
