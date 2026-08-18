@@ -28,6 +28,60 @@ export type Env = {
 
 import { resolveAllowedOrigin, JWT_AUTHORIZED_PARTIES } from './cors.js';
 
+const MAX_BODY_SIZE_BYTES = 102400; // 100KB cap
+
+async function checkBodySize(
+  request: Request
+): Promise<{ ok: true; request: Request } | { ok: false; response: Response }> {
+  if (request.method !== 'POST' || !request.body) {
+    return { ok: true, request };
+  }
+
+  const contentLength = request.headers.get('content-length');
+  if (contentLength !== null) {
+    const cl = parseInt(contentLength, 10);
+    if (!isNaN(cl) && cl > MAX_BODY_SIZE_BYTES) {
+      return {
+        ok: false,
+        response: new Response('Request body too large.', { status: 413 }),
+      };
+    }
+  }
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_BODY_SIZE_BYTES) {
+        await reader.cancel();
+        return {
+          ok: false,
+          response: new Response('Request body too large.', { status: 413 }),
+        };
+      }
+      chunks.push(value);
+    }
+  }
+
+  const combined = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  const reconstructedRequest = new Request(request, {
+    body: combined,
+  });
+
+  return { ok: true, request: reconstructedRequest };
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const clerkResponse = await handleClerkWebhook(request, env);
@@ -54,9 +108,14 @@ export default {
       });
     }
 
+    const bodyCheck = await checkBodySize(request);
+    if (!bodyCheck.ok) {
+      return bodyCheck.response;
+    }
+
     const response = await fetchRequestHandler({
       endpoint: '/trpc',
-      req: request,
+      req: bodyCheck.request,
       router: appRouter,
       createContext: (opts) =>
         createContext({
