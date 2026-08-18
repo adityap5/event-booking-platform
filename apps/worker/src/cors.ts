@@ -16,3 +16,11 @@ export function resolveAllowedOrigin(request: Request): string {
   }
   return CORS_ALLOWED_ORIGINS[0] as string;
 }
+
+export function applyWorkerSecurityHeaders(response: Response): Response {
+  response.headers.set('X-Content-Type-Options', 'nosniff');
+  response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  response.headers.set('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+  response.headers.set('Content-Security-Policy', "frame-ancestors 'none'");
+  return response;
+}

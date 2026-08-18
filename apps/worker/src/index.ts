@@ -26,7 +26,7 @@ export type Env = {
   RATE_LIMITER: DurableObjectNamespace<RateLimiter>; 
 };
 
-import { resolveAllowedOrigin, JWT_AUTHORIZED_PARTIES } from './cors.js';
+import { resolveAllowedOrigin, JWT_AUTHORIZED_PARTIES, applyWorkerSecurityHeaders } from './cors.js';
 
 const MAX_BODY_SIZE_BYTES = 102400; // 100KB cap
 
@@ -85,20 +85,25 @@ async function checkBodySize(
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const clerkResponse = await handleClerkWebhook(request, env);
-    if (clerkResponse) return clerkResponse;
+    if (clerkResponse) return applyWorkerSecurityHeaders(clerkResponse);
 
     const stripeResponse = await handleStripeWebhook(request, env);
-    if (stripeResponse) return stripeResponse;
+    if (stripeResponse) return applyWorkerSecurityHeaders(stripeResponse);
 
     const uploadResponse = await handleUpload(request, env);
-    if (uploadResponse) return uploadResponse;
+    if (uploadResponse) return applyWorkerSecurityHeaders(uploadResponse);
 
     const wsResponse = await handleWebSocketUpgrade(request, env);
-    if (wsResponse) return wsResponse;
+    if (wsResponse) {
+      if (wsResponse.status === 101) {
+        return wsResponse;
+      }
+      return applyWorkerSecurityHeaders(wsResponse);
+    }
 
     // Handle CORS preflight requests for tRPC
     if (request.method === 'OPTIONS') {
-      return new Response(null, {
+      const optionsResponse = new Response(null, {
         headers: {
           'Access-Control-Allow-Origin': resolveAllowedOrigin(request),
           'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -106,11 +111,12 @@ export default {
           'Access-Control-Max-Age': '86400',
         },
       });
+      return applyWorkerSecurityHeaders(optionsResponse);
     }
 
     const bodyCheck = await checkBodySize(request);
     if (!bodyCheck.ok) {
-      return bodyCheck.response;
+      return applyWorkerSecurityHeaders(bodyCheck.response);
     }
 
     const response = await fetchRequestHandler({
@@ -127,9 +133,10 @@ export default {
         }),
     });
 
-    // Append CORS and Cache-Control headers to the tRPC response
+    // Append CORS, Cache-Control, and Security headers to the tRPC response
     response.headers.set('Access-Control-Allow-Origin', resolveAllowedOrigin(request));
     response.headers.set('Cache-Control', 'no-store');
+    applyWorkerSecurityHeaders(response);
     return response;
   },
 } satisfies ExportedHandler<Env>;
