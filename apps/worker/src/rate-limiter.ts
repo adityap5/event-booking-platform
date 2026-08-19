@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { Env } from './index.js';
+import * as Sentry from '@sentry/cloudflare';
 
 /**
  * RateLimiter — Durable Object for per-user, per-action rate limiting.
@@ -9,7 +10,7 @@ import type { Env } from './index.js';
  * external state needed. Window resets are lazy: stale windows are replaced
  * on the first request after windowMs has elapsed.
  */
-export class RateLimiter extends DurableObject<Env> {
+class RateLimiterBase extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
 
@@ -70,5 +71,12 @@ export class RateLimiter extends DurableObject<Env> {
     return { allowed: true, remaining: limit - count - 1 };
   }
 }
+
+export type RateLimiter = RateLimiterBase;
+
+export const RateLimiter = Sentry.instrumentDurableObjectWithSentry(
+  (env: Env) => ({ dsn: env.SENTRY_DSN }),
+  RateLimiterBase
+);
 
 export { RateLimiter as default };

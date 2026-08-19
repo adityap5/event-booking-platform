@@ -5,6 +5,7 @@ import { eq } from 'drizzle-orm';
 import { dispatchEmailConfirmation, dispatchCalendarInvite } from '../integrations.js';
 import { confirmBookingFromPayment } from '../booking-confirmation.js';
 import type { Env } from '../index.js';
+import * as Sentry from '@sentry/cloudflare';
 
 export async function handleStripeWebhook(request: Request, env: Env): Promise<Response | null> {
   const url = new URL(request.url);
@@ -58,6 +59,13 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
         });
       } catch (err: any) {
         console.error('payment_intent.succeeded: unexpected confirmSeat error:', err);
+        Sentry.captureException(err, {
+          extra: {
+            holdId,
+            eventId,
+            paymentIntentId: paymentIntent.id,
+          },
+        });
         return new Response('Internal error', { status: 500 });
       }
 
@@ -78,10 +86,18 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
           // No side effects occurred (checked before confirmSeat) — safe to
           // return 500 and let Stripe retry once the data issue is fixed.
           console.error('payment_intent.succeeded: event not found', { holdId, eventId });
+          Sentry.captureMessage('payment_intent.succeeded: event not found', {
+            level: 'warning',
+            extra: { holdId, eventId },
+          });
           return new Response('Event not found', { status: 500 });
 
         case 'attendee_not_found':
           console.error('payment_intent.succeeded: attendee not found for userId', result.userId);
+          Sentry.captureMessage('payment_intent.succeeded: attendee not found', {
+            level: 'warning',
+            extra: { userId: result.userId, holdId, eventId },
+          });
           return new Response('Attendee not found', { status: 500 });
 
         case 'orphaned_hold':
@@ -92,6 +108,14 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
           // — 500 keeps Stripe retrying in case a fix lands within its retry
           // window, but this needs eyes-on / day-7 reconciliation regardless.
           console.error('payment_intent.succeeded: ORPHANED HOLD — DO shows consumed, no D1 booking exists', result);
+          Sentry.captureMessage('payment_intent.succeeded: ORPHANED HOLD', {
+            level: 'error',
+            extra: {
+              holdId: result.holdId,
+              eventId: result.eventId,
+              stripePaymentIntentId: paymentIntent.id,
+            },
+          });
           return new Response('Orphaned hold — needs reconciliation', { status: 500 });
 
         case 'amount_mismatch':
@@ -102,6 +126,16 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
           // fires, that invariant has broken somewhere and needs investigating,
           // not just retrying. Loud on purpose; wire to Sentry/Axiom on days 5–6.
           console.error('payment_intent.succeeded: AMOUNT MISMATCH — possible seatCount/price desync', result);
+          Sentry.captureMessage('payment_intent.succeeded: AMOUNT MISMATCH', {
+            level: 'error',
+            extra: {
+              holdId: result.holdId,
+              eventId: result.eventId,
+              seatCount: result.seatCount,
+              expectedPence: result.expectedPence,
+              receivedPence: result.receivedPence,
+            },
+          });
           return new Response('Amount mismatch', { status: 500 });
 
         case 'confirmed': {
@@ -133,6 +167,13 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
           } catch {
             // Stub errors are swallowed — real implementation would log to a dead-letter queue
             console.error('[INTEGRATIONS] Stub dispatch failed — would DLQ in production');
+            Sentry.captureMessage('[INTEGRATIONS] Stub dispatch failed — would DLQ in production', {
+              level: 'warning',
+              extra: {
+                holdId,
+                bookingId: booking.id,
+              },
+            });
           }
 
           return new Response('', { status: 200 });

@@ -4,6 +4,7 @@
   "name": "event-booking-worker",
   "main": "src/index.ts",
  "compatibility_date": "2026-07-29",
+  "compatibility_flags": ["nodejs_als"],
 
   // ── Storage bindings ──────────────────────────────────────────────
 

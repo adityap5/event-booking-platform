@@ -92,6 +92,7 @@ export const bookingsRouter = {
   throw new TRPCError({
     code: 'INTERNAL_SERVER_ERROR',
     message: 'Unable to reserve seats',
+    cause: err,
   });
 }
     }),

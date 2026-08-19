@@ -1,12 +1,13 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./index.js";
 import { z } from 'zod';
+import * as Sentry from '@sentry/cloudflare';
 
 const socketMessageSchema = z.object({
   type: z.enum(['ping']),
 });
 
-export class SeatLedger extends DurableObject {
+class SeatLedgerBase extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     
@@ -326,24 +327,32 @@ export class SeatLedger extends DurableObject {
   }
 
   webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
-  try {
-    const raw = JSON.parse(typeof message === 'string' ? message : '');
-    const parsed = socketMessageSchema.safeParse(raw);
-    if (!parsed.success) return; // Unknown message type — ignore silently
-    if (parsed.data.type === 'ping') {
-      ws.send(JSON.stringify({ type: 'pong' }));
+    try {
+      const raw = JSON.parse(typeof message === 'string' ? message : '');
+      const parsed = socketMessageSchema.safeParse(raw);
+      if (!parsed.success) return; // Unknown message type — ignore silently
+      if (parsed.data.type === 'ping') {
+        ws.send(JSON.stringify({ type: 'pong' }));
+      }
+      const [userId] = (ws as unknown as { attachment: [string] }).attachment;
+      void userId;
+    } catch {
+      // Malformed JSON — ignore
     }
-    const [userId] = (ws as unknown as { attachment: [string] }).attachment;
-    void userId;
-  } catch {
-    // Malformed JSON — ignore
   }
-}
 
   webSocketClose(_ws: WebSocket, _code: number, _reason: string): void {
   }
 
   webSocketError(_ws: WebSocket, error: unknown): void {
     console.error('WebSocket error:', error);
+    Sentry.captureException(error);
   }
 }
+
+export type SeatLedger = SeatLedgerBase;
+
+export const SeatLedger = Sentry.instrumentDurableObjectWithSentry(
+  (env: Env) => ({ dsn: env.SENTRY_DSN }),
+  SeatLedgerBase
+);

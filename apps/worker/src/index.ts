@@ -3,6 +3,7 @@ import { createContext } from '@event-booking/trpc';
 import { appRouter } from './router.js';
 import { drizzle } from 'drizzle-orm/d1';
 import * as schema from '@event-booking/shared';
+import * as Sentry from '@sentry/cloudflare';
 
 import { SeatLedger } from "./seat-ledger.js";
 import { RateLimiter } from "./rate-limiter.js";
@@ -23,7 +24,8 @@ export type Env = {
   SEAT_LEDGER: DurableObjectNamespace<SeatLedger>;
   EVENT_COVERS: R2Bucket;        
   EVENT_CACHE: KVNamespace;  
-  RATE_LIMITER: DurableObjectNamespace<RateLimiter>; 
+  RATE_LIMITER: DurableObjectNamespace<RateLimiter>;
+  SENTRY_DSN: string;
 };
 
 import { resolveAllowedOrigin, JWT_AUTHORIZED_PARTIES, applyWorkerSecurityHeaders } from './cors.js';
@@ -82,61 +84,83 @@ async function checkBodySize(
   return { ok: true, request: reconstructedRequest };
 }
 
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    const clerkResponse = await handleClerkWebhook(request, env);
-    if (clerkResponse) return applyWorkerSecurityHeaders(clerkResponse);
+export default Sentry.withSentry(
+  (env: Env) => ({
+    dsn: env.SENTRY_DSN,
+  }),
+  {
+    async fetch(request: Request, env: Env): Promise<Response> {
+      const clerkResponse = await handleClerkWebhook(request, env);
+      if (clerkResponse) return applyWorkerSecurityHeaders(clerkResponse);
 
-    const stripeResponse = await handleStripeWebhook(request, env);
-    if (stripeResponse) return applyWorkerSecurityHeaders(stripeResponse);
+      const stripeResponse = await handleStripeWebhook(request, env);
+      if (stripeResponse) return applyWorkerSecurityHeaders(stripeResponse);
 
-    const uploadResponse = await handleUpload(request, env);
-    if (uploadResponse) return applyWorkerSecurityHeaders(uploadResponse);
+      const uploadResponse = await handleUpload(request, env);
+      if (uploadResponse) return applyWorkerSecurityHeaders(uploadResponse);
 
-    const wsResponse = await handleWebSocketUpgrade(request, env);
-    if (wsResponse) {
-      if (wsResponse.status === 101) {
-        return wsResponse;
+      const wsResponse = await handleWebSocketUpgrade(request, env);
+      if (wsResponse) {
+        if (wsResponse.status === 101) {
+          return wsResponse;
+        }
+        return applyWorkerSecurityHeaders(wsResponse);
       }
-      return applyWorkerSecurityHeaders(wsResponse);
-    }
 
-    // Handle CORS preflight requests for tRPC
-    if (request.method === 'OPTIONS') {
-      const optionsResponse = new Response(null, {
-        headers: {
-          'Access-Control-Allow-Origin': resolveAllowedOrigin(request),
-          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-          'Access-Control-Max-Age': '86400',
+      // Handle CORS preflight requests for tRPC
+      if (request.method === 'OPTIONS') {
+        const optionsResponse = new Response(null, {
+          headers: {
+            'Access-Control-Allow-Origin': resolveAllowedOrigin(request),
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+            'Access-Control-Max-Age': '86400',
+          },
+        });
+        return applyWorkerSecurityHeaders(optionsResponse);
+      }
+
+      const bodyCheck = await checkBodySize(request);
+      if (!bodyCheck.ok) {
+        return applyWorkerSecurityHeaders(bodyCheck.response);
+      }
+
+      const response = await fetchRequestHandler({
+        endpoint: '/trpc',
+        req: bodyCheck.request,
+        router: appRouter,
+        createContext: (opts) =>
+          createContext({
+            ...opts,
+            clerkJwtKey: env.CLERK_JWT_KEY,
+            authorizedParties: JWT_AUTHORIZED_PARTIES,
+            db: drizzle(env.DB, { schema }),
+            env,
+          }),
+        onError({ error, type, path }) {
+          const isExpectedAppError =
+            error.code === 'UNAUTHORIZED' ||
+            error.code === 'FORBIDDEN' ||
+            error.code === 'NOT_FOUND' ||
+            error.code === 'CONFLICT' ||
+            error.code === 'PRECONDITION_FAILED' ||
+            error.code === 'TOO_MANY_REQUESTS' ||
+            error.code === 'BAD_REQUEST';
+
+          if (!isExpectedAppError) {
+            Sentry.captureException(error.cause ?? error, {
+              tags: { path, type },
+              extra: { code: error.code },
+            });
+          }
         },
       });
-      return applyWorkerSecurityHeaders(optionsResponse);
-    }
 
-    const bodyCheck = await checkBodySize(request);
-    if (!bodyCheck.ok) {
-      return applyWorkerSecurityHeaders(bodyCheck.response);
-    }
-
-    const response = await fetchRequestHandler({
-      endpoint: '/trpc',
-      req: bodyCheck.request,
-      router: appRouter,
-      createContext: (opts) =>
-        createContext({
-          ...opts,
-          clerkJwtKey: env.CLERK_JWT_KEY,
-          authorizedParties: JWT_AUTHORIZED_PARTIES,
-          db: drizzle(env.DB, { schema }),
-          env,
-        }),
-    });
-
-    // Append CORS, Cache-Control, and Security headers to the tRPC response
-    response.headers.set('Access-Control-Allow-Origin', resolveAllowedOrigin(request));
-    response.headers.set('Cache-Control', 'no-store');
-    applyWorkerSecurityHeaders(response);
-    return response;
-  },
-} satisfies ExportedHandler<Env>;
+      // Append CORS, Cache-Control, and Security headers to the tRPC response
+      response.headers.set('Access-Control-Allow-Origin', resolveAllowedOrigin(request));
+      response.headers.set('Cache-Control', 'no-store');
+      applyWorkerSecurityHeaders(response);
+      return response;
+    },
+  } satisfies ExportedHandler<Env>,
+);

@@ -6,6 +6,7 @@ import { events } from '@event-booking/shared';
 import { eq, gte, asc } from 'drizzle-orm';
 import { TRPCError } from '@trpc/server';
 import { workerProcedure, publicWorkerProcedure } from '../procedures.js';
+import * as Sentry from '@sentry/cloudflare';
 
 export const eventsRouter = {
   getAvailableSeats: publicWorkerProcedure
@@ -178,6 +179,12 @@ export const eventsRouter = {
           } catch (err) {
             // R2 error must not block event creation — log and continue with no image
             console.error('[createEvent] R2 image finalize failed, creating event without cover:', err);
+            Sentry.captureException(err, {
+              extra: {
+                eventId,
+                tempImageKey: input.tempImageKey,
+              },
+            });
           }
         }
       }

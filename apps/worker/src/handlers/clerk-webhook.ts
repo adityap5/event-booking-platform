@@ -3,6 +3,7 @@ import { drizzle } from 'drizzle-orm/d1';
 import { eq } from 'drizzle-orm';
 import * as schema from '@event-booking/shared';
 import type { Env } from '../index.js';
+import * as Sentry from '@sentry/cloudflare';
 
 export async function handleClerkWebhook(request: Request, env: Env): Promise<Response | null> {
   const url = new URL(request.url);
@@ -63,12 +64,26 @@ export async function handleClerkWebhook(request: Request, env: Env): Promise<Re
             newOrgId: evt.data.id,
             ownerId: evt.data.created_by,
           });
+          Sentry.captureMessage('[ORG_OWNER_CONFLICT]', {
+            level: 'warning',
+            extra: {
+              existingOrgId: existingOrg?.id ?? 'unknown',
+              newOrgId: evt.data.id,
+              ownerId: evt.data.created_by,
+            },
+          });
           return new Response('', { status: 200 });
         }
 
         console.error('Error inserting organisation to DB:', err);
         console.error('Error cause:', err.cause);
         console.error('Error stack:', err.stack);
+        Sentry.captureException(err, {
+          extra: {
+            orgId: evt.data.id,
+            ownerId: evt.data.created_by,
+          },
+        });
         return new Response('Database error', { status: 500 });
       }
     }
