@@ -42,8 +42,8 @@ class SeatLedgerBase extends DurableObject<Env> {
   }
 
   private logEvent(event: {
-    type: 'RESERVED' | 'CONFIRMED' | 'RELEASED' | 'EXPIRED' | 'ALREADY_USED' | 'NOT_FOUND' | 'SOLD_OUT'
-    holdId: string
+    type: 'RESERVED' | 'CONFIRMED' | 'RELEASED' | 'EXPIRED' | 'ALREADY_USED' | 'NOT_FOUND' | 'SOLD_OUT' | 'TOO_MANY_PENDING_HOLDS'
+    holdId?: string
     eventId?: string
     userId?: string
     seatCount?: number
@@ -112,6 +112,7 @@ class SeatLedgerBase extends DurableObject<Env> {
     // user who wants to change their seat count must wait out the 15-minute
     // expiry.
     if (pendingCount >= 1) {
+      this.logEvent({ type: 'TOO_MANY_PENDING_HOLDS', userId, reason: 'Pending hold limit reached' });
       throw new Error("TOO_MANY_PENDING_HOLDS");
     }
 

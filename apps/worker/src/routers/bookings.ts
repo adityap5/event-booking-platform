@@ -6,6 +6,7 @@ import { eq, and, asc } from 'drizzle-orm';
 import { createClerkClient } from '@clerk/backend';
 import { TRPCError } from '@trpc/server';
 import { workerProcedure } from '../procedures.js';
+import { logStructured } from '../logger.js';
 
 export const bookingsRouter = {
   getEventAttendees: protectedProcedure
@@ -54,6 +55,11 @@ export const bookingsRouter = {
       const rateLimiter = ctx.env.RATE_LIMITER.get(ctx.env.RATE_LIMITER.idFromName(ctx.userId));
       const { allowed } = await rateLimiter.checkLimit('reserveSeat', 10, 60_000);
       if (!allowed) {
+        logStructured({
+          category: 'rate_limit_rejection',
+          action: 'reserveSeat',
+          userId: ctx.userId,
+        });
         throw new TRPCError({
           code: 'TOO_MANY_REQUESTS',
           message: 'Too many reservation attempts. Try again in a minute.',

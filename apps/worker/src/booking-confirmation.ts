@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import * as schema from '@event-booking/shared';
 import { events } from '@event-booking/shared';
+import { logStructured } from './logger.js';
 
 /**
  * Minimal shape of the SEAT_LEDGER DO stub this helper needs.
@@ -150,6 +151,15 @@ export async function confirmBookingFromPayment(
     // A retry after this will land in the 'orphaned_hold' branch above
     // (booking still won't exist), which is the correct outcome — this is
     // exactly the kind of gap the day-7 reconciliation job is meant to catch.
+    logStructured({
+      category: 'invariant_violation',
+      action: 'amount_mismatch',
+      holdId,
+      eventId,
+      seatCount: confirmResult.seatCount,
+      expectedPence,
+      receivedPence: amountReceivedPence,
+    });
     return {
       outcome: 'amount_mismatch',
       expectedPence,

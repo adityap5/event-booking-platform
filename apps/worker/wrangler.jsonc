@@ -5,6 +5,15 @@
   "main": "src/index.ts",
  "compatibility_date": "2026-07-29",
   "compatibility_flags": ["nodejs_als"],
+  "observability": {
+  "enabled": true,
+  "logs": {
+    "enabled": true,
+    "invocation_logs": true,
+    "persist": true
+  }
+},
+"logpush": true,
 
   // ── Storage bindings ──────────────────────────────────────────────
 

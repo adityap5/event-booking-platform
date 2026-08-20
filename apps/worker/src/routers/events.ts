@@ -7,6 +7,7 @@ import { eq, gte, asc } from 'drizzle-orm';
 import { TRPCError } from '@trpc/server';
 import { workerProcedure, publicWorkerProcedure } from '../procedures.js';
 import * as Sentry from '@sentry/cloudflare';
+import { logStructured } from '../logger.js';
 
 export const eventsRouter = {
   getAvailableSeats: publicWorkerProcedure
@@ -142,6 +143,12 @@ export const eventsRouter = {
       const rateLimiter = ctx.env.RATE_LIMITER.get(ctx.env.RATE_LIMITER.idFromName(orgId));
       const { allowed } = await rateLimiter.checkLimit('createEvent', 5, 60 * 60_000);
       if (!allowed) {
+        logStructured({
+          category: 'rate_limit_rejection',
+          action: 'createEvent',
+          userId: ctx.userId,
+          orgId,
+        });
         throw new TRPCError({
           code: 'TOO_MANY_REQUESTS',
           message: 'Too many events created recently. Try again later.',

@@ -1,6 +1,7 @@
 import { verifyToken } from '@clerk/backend';
 import { resolveAllowedOrigin, JWT_AUTHORIZED_PARTIES } from '../cors.js';
 import type { Env } from '../index.js';
+import { logStructured } from '../logger.js';
 
 export async function handleUpload(request: Request, env: Env): Promise<Response | null> {
   const url = new URL(request.url);
@@ -41,6 +42,11 @@ export async function handleUpload(request: Request, env: Env): Promise<Response
     const rateLimiter = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(userId));
     const { allowed } = await rateLimiter.checkLimit('uploadEventCover', 5, 60_000);
     if (!allowed) {
+      logStructured({
+        category: 'rate_limit_rejection',
+        action: 'uploadEventCover',
+        userId,
+      });
       return new Response('Too many uploads. Please try again shortly.', { status: 429 });
     }
 
@@ -118,6 +124,11 @@ export async function handleUpload(request: Request, env: Env): Promise<Response
     const rateLimiter = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(ip));
     const { allowed } = await rateLimiter.checkLimit('publicImageRead', 120, 60_000);
     if (!allowed) {
+      logStructured({
+        category: 'rate_limit_rejection',
+        action: 'publicImageRead',
+        keyType: 'ip',
+      });
       return new Response('Too many requests. Please try again shortly.', { status: 429 });
     }
 

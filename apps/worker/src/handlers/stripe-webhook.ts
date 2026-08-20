@@ -6,6 +6,7 @@ import { dispatchEmailConfirmation, dispatchCalendarInvite } from '../integratio
 import { confirmBookingFromPayment } from '../booking-confirmation.js';
 import type { Env } from '../index.js';
 import * as Sentry from '@sentry/cloudflare';
+import { logStructured } from '../logger.js';
 
 export async function handleStripeWebhook(request: Request, env: Env): Promise<Response | null> {
   const url = new URL(request.url);
@@ -116,6 +117,12 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
               stripePaymentIntentId: paymentIntent.id,
             },
           });
+          logStructured({
+            category: 'invariant_violation',
+            action: 'orphaned_hold',
+            holdId: result.holdId,
+            eventId: result.eventId,
+          });
           return new Response('Orphaned hold — needs reconciliation', { status: 500 });
 
         case 'amount_mismatch':
@@ -135,6 +142,15 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
               expectedPence: result.expectedPence,
               receivedPence: result.receivedPence,
             },
+          });
+          logStructured({
+            category: 'invariant_violation',
+            action: 'amount_mismatch',
+            holdId: result.holdId,
+            eventId: result.eventId,
+            seatCount: result.seatCount,
+            expectedPence: result.expectedPence,
+            receivedPence: result.receivedPence,
           });
           return new Response('Amount mismatch', { status: 500 });
 

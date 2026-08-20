@@ -3,6 +3,7 @@ import { events } from '@event-booking/shared';
 import { eq } from 'drizzle-orm';
 import { TRPCError } from '@trpc/server';
 import { workerProcedure } from '../procedures.js';
+import { logStructured } from '../logger.js';
 
 export const realtimeRouter = {
   createSocketTicket: workerProcedure
@@ -12,6 +13,11 @@ export const realtimeRouter = {
       const rateLimiter = ctx.env.RATE_LIMITER.get(ctx.env.RATE_LIMITER.idFromName(ctx.userId));
       const { allowed } = await rateLimiter.checkLimit('createSocketTicket', 10, 60_000);
       if (!allowed) {
+        logStructured({
+          category: 'rate_limit_rejection',
+          action: 'createSocketTicket',
+          userId: ctx.userId,
+        });
         throw new TRPCError({
           code: 'TOO_MANY_REQUESTS',
           message: 'Too many requests. Please try again shortly.',

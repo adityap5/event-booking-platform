@@ -1,6 +1,7 @@
 import { protectedProcedure, publicProcedure } from '@event-booking/trpc';
 import { TRPCError } from '@trpc/server';
 import type { R2Bucket, DurableObjectId } from '@cloudflare/workers-types';
+import { logStructured } from './logger.js';
 
 export interface WorkerEnv {
   CLERK_SECRET_KEY: string;
@@ -52,6 +53,11 @@ export const publicWorkerProcedure = publicProcedure.use(async ({ next, ctx }) =
   const rateLimiter = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(ip));
   const { allowed } = await rateLimiter.checkLimit('publicRead', 60, 60_000);
   if (!allowed) {
+    logStructured({
+      category: 'rate_limit_rejection',
+      action: 'publicRead',
+      keyType: 'ip',
+    });
     throw new TRPCError({
       code: 'TOO_MANY_REQUESTS',
       message: 'Too many requests. Please try again shortly.',

@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import Stripe from 'stripe';
 import { TRPCError } from '@trpc/server';
 import { workerProcedure } from '../procedures.js';
+import { logStructured } from '../logger.js';
 
 export const paymentsRouter = {
   createCheckoutSession: workerProcedure
@@ -16,6 +17,11 @@ export const paymentsRouter = {
       const rateLimiter = ctx.env.RATE_LIMITER.get(ctx.env.RATE_LIMITER.idFromName(ctx.userId));
       const { allowed } = await rateLimiter.checkLimit('createCheckoutSession', 10, 60_000);
       if (!allowed) {
+        logStructured({
+          category: 'rate_limit_rejection',
+          action: 'createCheckoutSession',
+          userId: ctx.userId,
+        });
         throw new TRPCError({
           code: 'TOO_MANY_REQUESTS',
           message: 'Too many requests. Please try again shortly.',
