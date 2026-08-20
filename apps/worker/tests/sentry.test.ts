@@ -27,7 +27,7 @@ vi.mock('@clerk/backend', async (importOriginal) => {
     verifyToken: vi.fn(async (token: string) => {
       if (token.startsWith('valid-test-token')) {
         return {
-          sub: 'user_sentry_test_123',
+          sub: `user_${token}`,
           o: {
             id: 'test-org-sentry',
             rol: 'org:admin',
@@ -117,7 +117,7 @@ describe('Sentry Error Monitoring Integration', () => {
     });
   }
 
-  it('1. Unexpected / internal tRPC error (INTERNAL_SERVER_ERROR): fetchRequestHandler.onError captures exact underlying exception with metadata, response unchanged', async () => {
+  it('1. Unexpected / internal tRPC error in reserveSeat (INTERNAL_SERVER_ERROR): fetchRequestHandler.onError captures exact underlying exception with metadata, response unchanged', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const expectedError = new Error('DO SQLite internal corruption');
@@ -154,6 +154,52 @@ describe('Sentry Error Monitoring Integration', () => {
         extra: { code: 'INTERNAL_SERVER_ERROR' },
       })
     );
+  });
+
+  it('1b. Unexpected / internal tRPC error in ensureAttendee (INTERNAL_SERVER_ERROR): fetchRequestHandler.onError captures exact underlying DB error with metadata, response unchanged', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const expectedDbError = new Error('D1 attendee table write error');
+    const originalPrepare = workerEnv.DB.prepare.bind(workerEnv.DB);
+
+    // Spy on DB prepare to throw error ONLY when inserting into attendees table
+    const dbSpy = vi.spyOn(workerEnv.DB, 'prepare').mockImplementation((query: string) => {
+      const q = query.toLowerCase();
+      if (q.includes('insert') && q.includes('attendees')) {
+        throw expectedDbError;
+      }
+      return originalPrepare(query);
+    });
+
+    try {
+      const req = new Request('https://worker.dev/trpc/ensureAttendee', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer valid-test-token-new-user-123',
+        },
+        body: JSON.stringify({}),
+      });
+
+      const res = await worker.fetch(req, workerEnv);
+
+      // Verify client response is HTTP 500 with unchanged error payload
+      expect(res.status).toBe(500);
+      const body = await res.json() as { error: { message: string; data: { code: string } } };
+      expect(body.error.message).toBe('Failed to create attendee profile');
+      expect(body.error.data.code).toBe('INTERNAL_SERVER_ERROR');
+
+      // Verify Sentry.captureException was called with the real underlying DB error (not the TRPCError wrapper)
+      expect(Sentry.captureException).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'D1 attendee table write error' }),
+        expect.objectContaining({
+          tags: { path: 'ensureAttendee', type: 'mutation' },
+          extra: { code: 'INTERNAL_SERVER_ERROR' },
+        })
+      );
+    } finally {
+      dbSpy.mockRestore();
+    }
   });
 
   it('2. Expected tRPC error path (UNAUTHORIZED): does NOT capture exception, response unchanged', async () => {
