@@ -18,7 +18,7 @@ export interface StructuredLogPayload {
  */
 export function logStructured(payload: StructuredLogPayload): void {
   try {
-    console.log(JSON.stringify({ ts: Date.now(), ...payload }));
+    console.log({ ts: Date.now(), ...payload });
   } catch {
     // Prevent logging failures from breaking application execution
   }

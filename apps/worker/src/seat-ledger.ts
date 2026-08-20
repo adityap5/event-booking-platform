@@ -51,7 +51,7 @@ class SeatLedgerBase extends DurableObject<Env> {
     reason?: string
   }): void {
     try {
-      console.log(JSON.stringify({ ts: Date.now(), ...event }));
+      console.log({ ts: Date.now(), ...event });
     } catch {
       // Never crash the DO due to logging failure
     }

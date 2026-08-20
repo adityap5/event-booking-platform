@@ -73,23 +73,18 @@ describe('Day 6 Structured Logging & Observability Groundwork', () => {
         })
       );
 
-      const rateLimitLog = consoleSpy.mock.calls.find((call) => {
-        try {
-          const parsed = JSON.parse(call[0]);
-          return parsed.category === 'rate_limit_rejection' && parsed.action === 'reserveSeat';
-        } catch {
-          return false;
-        }
-      });
+      const rateLimitLog = consoleSpy.mock.calls.find((call) =>
+        call[0]?.category === 'rate_limit_rejection' && call[0]?.action === 'reserveSeat'
+      );
 
       expect(rateLimitLog).toBeDefined();
-      const parsedLog = JSON.parse(rateLimitLog![0]);
-      expect(parsedLog).toMatchObject({
+      const logObj = rateLimitLog![0];
+      expect(logObj).toMatchObject({
         category: 'rate_limit_rejection',
         action: 'reserveSeat',
         userId,
       });
-      expect(parsedLog.ts).toBeTypeOf('number');
+      expect(logObj.ts).toBeTypeOf('number');
     });
 
     it('logs structured JSON on createEvent rate-limit rejection', async () => {
@@ -125,18 +120,13 @@ describe('Day 6 Structured Logging & Observability Groundwork', () => {
         })
       );
 
-      const rateLimitLog = consoleSpy.mock.calls.find((call) => {
-        try {
-          const parsed = JSON.parse(call[0]);
-          return parsed.category === 'rate_limit_rejection' && parsed.action === 'createEvent';
-        } catch {
-          return false;
-        }
-      });
+      const rateLimitLog = consoleSpy.mock.calls.find((call) =>
+        call[0]?.category === 'rate_limit_rejection' && call[0]?.action === 'createEvent'
+      );
 
       expect(rateLimitLog).toBeDefined();
-      const parsedLog = JSON.parse(rateLimitLog![0]);
-      expect(parsedLog).toMatchObject({
+      const logObj = rateLimitLog![0];
+      expect(logObj).toMatchObject({
         category: 'rate_limit_rejection',
         action: 'createEvent',
         userId,
@@ -169,18 +159,13 @@ describe('Day 6 Structured Logging & Observability Groundwork', () => {
         })
       );
 
-      const rateLimitLog = consoleSpy.mock.calls.find((call) => {
-        try {
-          const parsed = JSON.parse(call[0]);
-          return parsed.category === 'rate_limit_rejection' && parsed.action === 'createCheckoutSession';
-        } catch {
-          return false;
-        }
-      });
+      const rateLimitLog = consoleSpy.mock.calls.find((call) =>
+        call[0]?.category === 'rate_limit_rejection' && call[0]?.action === 'createCheckoutSession'
+      );
 
       expect(rateLimitLog).toBeDefined();
-      const parsedLog = JSON.parse(rateLimitLog![0]);
-      expect(parsedLog).toMatchObject({
+      const logObj = rateLimitLog![0];
+      expect(logObj).toMatchObject({
         category: 'rate_limit_rejection',
         action: 'createCheckoutSession',
         userId,
@@ -209,18 +194,13 @@ describe('Day 6 Structured Logging & Observability Groundwork', () => {
         })
       );
 
-      const rateLimitLog = consoleSpy.mock.calls.find((call) => {
-        try {
-          const parsed = JSON.parse(call[0]);
-          return parsed.category === 'rate_limit_rejection' && parsed.action === 'createSocketTicket';
-        } catch {
-          return false;
-        }
-      });
+      const rateLimitLog = consoleSpy.mock.calls.find((call) =>
+        call[0]?.category === 'rate_limit_rejection' && call[0]?.action === 'createSocketTicket'
+      );
 
       expect(rateLimitLog).toBeDefined();
-      const parsedLog = JSON.parse(rateLimitLog![0]);
-      expect(parsedLog).toMatchObject({
+      const logObj = rateLimitLog![0];
+      expect(logObj).toMatchObject({
         category: 'rate_limit_rejection',
         action: 'createSocketTicket',
         userId,
@@ -265,18 +245,13 @@ describe('Day 6 Structured Logging & Observability Groundwork', () => {
       expect(res?.status).toBe(429);
       expect(await res?.text()).toBe('Too many uploads. Please try again shortly.');
 
-      const rateLimitLog = consoleSpy.mock.calls.find((call) => {
-        try {
-          const parsed = JSON.parse(call[0]);
-          return parsed.category === 'rate_limit_rejection' && parsed.action === 'uploadEventCover';
-        } catch {
-          return false;
-        }
-      });
+      const rateLimitLog = consoleSpy.mock.calls.find((call) =>
+        call[0]?.category === 'rate_limit_rejection' && call[0]?.action === 'uploadEventCover'
+      );
 
       expect(rateLimitLog).toBeDefined();
-      const parsedLog = JSON.parse(rateLimitLog![0]);
-      expect(parsedLog).toMatchObject({
+      const logObj = rateLimitLog![0];
+      expect(logObj).toMatchObject({
         category: 'rate_limit_rejection',
         action: 'uploadEventCover',
         userId,
@@ -303,23 +278,18 @@ describe('Day 6 Structured Logging & Observability Groundwork', () => {
 
       expect(res?.status).toBe(429);
 
-      const rateLimitLog = consoleSpy.mock.calls.find((call) => {
-        try {
-          const parsed = JSON.parse(call[0]);
-          return parsed.category === 'rate_limit_rejection' && parsed.action === 'publicImageRead';
-        } catch {
-          return false;
-        }
-      });
+      const rateLimitLog = consoleSpy.mock.calls.find((call) =>
+        call[0]?.category === 'rate_limit_rejection' && call[0]?.action === 'publicImageRead'
+      );
 
       expect(rateLimitLog).toBeDefined();
-      const parsedLog = JSON.parse(rateLimitLog![0]);
-      expect(parsedLog).toMatchObject({
+      const logObj = rateLimitLog![0];
+      expect(logObj).toMatchObject({
         category: 'rate_limit_rejection',
         action: 'publicImageRead',
         keyType: 'ip',
       });
-      expect(parsedLog.ip).toBeUndefined();
+      expect(logObj.ip).toBeUndefined();
     });
 
     it('logs structured JSON on publicRead middleware rate-limit rejection (unauthenticated IP keying)', async () => {
@@ -340,23 +310,18 @@ describe('Day 6 Structured Logging & Observability Groundwork', () => {
         })
       );
 
-      const rateLimitLog = consoleSpy.mock.calls.find((call) => {
-        try {
-          const parsed = JSON.parse(call[0]);
-          return parsed.category === 'rate_limit_rejection' && parsed.action === 'publicRead';
-        } catch {
-          return false;
-        }
-      });
+      const rateLimitLog = consoleSpy.mock.calls.find((call) =>
+        call[0]?.category === 'rate_limit_rejection' && call[0]?.action === 'publicRead'
+      );
 
       expect(rateLimitLog).toBeDefined();
-      const parsedLog = JSON.parse(rateLimitLog![0]);
-      expect(parsedLog).toMatchObject({
+      const logObj = rateLimitLog![0];
+      expect(logObj).toMatchObject({
         category: 'rate_limit_rejection',
         action: 'publicRead',
         keyType: 'ip',
       });
-      expect(parsedLog.ip).toBeUndefined();
+      expect(logObj.ip).toBeUndefined();
     });
   });
 
@@ -382,24 +347,19 @@ describe('Day 6 Structured Logging & Observability Groundwork', () => {
       }
       expect(thrownErr?.message).toBe('TOO_MANY_PENDING_HOLDS');
 
-      const holdCapLog = consoleSpy.mock.calls.find((call) => {
-        try {
-          const parsed = JSON.parse(call[0]);
-          return parsed.type === 'TOO_MANY_PENDING_HOLDS';
-        } catch {
-          return false;
-        }
-      });
+      const holdCapLog = consoleSpy.mock.calls.find((call) =>
+        call[0]?.type === 'TOO_MANY_PENDING_HOLDS'
+      );
 
       expect(holdCapLog).toBeDefined();
-      const parsedLog = JSON.parse(holdCapLog![0]);
-      expect(parsedLog).toMatchObject({
+      const logObj = holdCapLog![0];
+      expect(logObj).toMatchObject({
         type: 'TOO_MANY_PENDING_HOLDS',
         userId,
         reason: 'Pending hold limit reached',
       });
-      expect(parsedLog.holdId).toBeUndefined();
-      expect(parsedLog.ts).toBeTypeOf('number');
+      expect(logObj.holdId).toBeUndefined();
+      expect(logObj.ts).toBeTypeOf('number');
     });
   });
 
@@ -435,18 +395,13 @@ describe('Day 6 Structured Logging & Observability Groundwork', () => {
 
       expect(result.outcome).toBe('amount_mismatch');
 
-      const mismatchLog = consoleSpy.mock.calls.find((call) => {
-        try {
-          const parsed = JSON.parse(call[0]);
-          return parsed.category === 'invariant_violation' && parsed.action === 'amount_mismatch';
-        } catch {
-          return false;
-        }
-      });
+      const mismatchLog = consoleSpy.mock.calls.find((call) =>
+        call[0]?.category === 'invariant_violation' && call[0]?.action === 'amount_mismatch'
+      );
 
       expect(mismatchLog).toBeDefined();
-      const parsedLog = JSON.parse(mismatchLog![0]);
-      expect(parsedLog).toMatchObject({
+      const logObj = mismatchLog![0];
+      expect(logObj).toMatchObject({
         category: 'invariant_violation',
         action: 'amount_mismatch',
         holdId,
@@ -523,18 +478,13 @@ describe('Day 6 Structured Logging & Observability Groundwork', () => {
       );
 
       // Verify new structured log line
-      const orphanedLog = consoleSpy.mock.calls.find((call) => {
-        try {
-          const parsed = JSON.parse(call[0]);
-          return parsed.category === 'invariant_violation' && parsed.action === 'orphaned_hold';
-        } catch {
-          return false;
-        }
-      });
+      const orphanedLog = consoleSpy.mock.calls.find((call) =>
+        call[0]?.category === 'invariant_violation' && call[0]?.action === 'orphaned_hold'
+      );
 
       expect(orphanedLog).toBeDefined();
-      const parsedLog = JSON.parse(orphanedLog![0]);
-      expect(parsedLog).toMatchObject({
+      const logObj = orphanedLog![0];
+      expect(logObj).toMatchObject({
         category: 'invariant_violation',
         action: 'orphaned_hold',
         holdId,
@@ -610,18 +560,13 @@ describe('Day 6 Structured Logging & Observability Groundwork', () => {
       );
 
       // Verify new structured log line
-      const mismatchLog = consoleSpy.mock.calls.find((call) => {
-        try {
-          const parsed = JSON.parse(call[0]);
-          return parsed.category === 'invariant_violation' && parsed.action === 'amount_mismatch';
-        } catch {
-          return false;
-        }
-      });
+      const mismatchLog = consoleSpy.mock.calls.find((call) =>
+        call[0]?.category === 'invariant_violation' && call[0]?.action === 'amount_mismatch'
+      );
 
       expect(mismatchLog).toBeDefined();
-      const parsedLog = JSON.parse(mismatchLog![0]);
-      expect(parsedLog).toMatchObject({
+      const logObj = mismatchLog![0];
+      expect(logObj).toMatchObject({
         category: 'invariant_violation',
         action: 'amount_mismatch',
         holdId,

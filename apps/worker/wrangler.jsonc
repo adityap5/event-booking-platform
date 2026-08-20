@@ -10,7 +10,8 @@
   "logs": {
     "enabled": true,
     "invocation_logs": true,
-    "persist": true
+    "persist": true,
+    "destinations": ["axiom-logs"]
   }
 },
 "logpush": true,
