@@ -96,7 +96,7 @@ describe('Day 6 Structured Logging & Observability Groundwork', () => {
       const consoleSpy = vi.spyOn(console, 'log');
       const userId = 'user-rate-create-evt';
       const orgId = 'test-org-1';
-      const caller = createTestCaller({ env: workerEnv, db, userId, orgId, role: 'org:admin' });
+      const caller = createTestCaller({ env: workerEnv, db, userId, orgId, role: 'organiser' });
 
       // Exhaust 5 allowed requests
       for (let i = 0; i < 5; i++) {

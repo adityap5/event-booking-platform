@@ -16,7 +16,7 @@ vi.mock('@clerk/backend', async (importOriginal) => {
           sub,
           o: {
             id: 'test-org-1',
-            rol: 'org:admin',
+            rol: 'organiser',
             slg: 'test-org-1',
           },
         };

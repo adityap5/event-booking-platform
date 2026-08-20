@@ -30,7 +30,7 @@ vi.mock('@clerk/backend', async (importOriginal) => {
           sub: `user_${token}`,
           o: {
             id: 'test-org-sentry',
-            rol: 'org:admin',
+            rol: 'organiser',
             slg: 'test-org-sentry',
           },
         };

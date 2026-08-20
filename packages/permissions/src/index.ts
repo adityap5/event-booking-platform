@@ -56,7 +56,7 @@ export function requireActiveOrganisation(ctx: AuthContext): string {
 
 /**
  * Ensures the caller has an active organisation in their context AND holds a specific role.
- * Use this for sensitive management actions (e.g. creating events) restricted to specific org roles (e.g. 'org:admin').
+ * Use this for sensitive management actions (e.g. creating events) restricted to specific org roles (e.g. 'organiser').
  */
 export function requireOrganiserRole(ctx: AuthContext, requiredRole: string): string {
   if (!ctx.orgId) {

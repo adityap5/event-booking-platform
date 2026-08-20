@@ -23,7 +23,7 @@ describe('Public Read Procedures & /images/* Rate Limiting', () => {
       db,
       userId: 'org-owner-seed',
       orgId: 'org-1',
-      role: 'org:admin',
+      role: 'organiser',
     });
     const createdEvent = await orgOwnerCaller.createEvent({
       name: 'Rate Limit Test Event',

@@ -6,7 +6,7 @@ const CSP_POLICY = [
   "script-src 'self' https://saved-foxhound-17.clerk.accounts.dev",
   "worker-src 'self' blob:",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' https://event-booking-worker.aditya29.workers.dev https://img.clerk.com",
+  "img-src 'self' blob: https://event-booking-worker.aditya29.workers.dev https://img.clerk.com",
   "connect-src 'self' https://event-booking-worker.aditya29.workers.dev wss://event-booking-worker.aditya29.workers.dev https://saved-foxhound-17.clerk.accounts.dev",
   "frame-ancestors 'none'",
   "base-uri 'self'",

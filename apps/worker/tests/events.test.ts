@@ -17,7 +17,7 @@ describe('Task 5: Per-organisation isolation', () => {
       db,
       userId: 'user-org-A-owner',
       orgId: 'org-A-id',
-      role: 'org:admin',
+      role: 'organiser',
     });
 
     const callerOrgB = createTestCaller({
@@ -25,7 +25,7 @@ describe('Task 5: Per-organisation isolation', () => {
       db,
       userId: 'user-org-B-owner',
       orgId: 'org-B-id',
-      role: 'org:admin',
+      role: 'organiser',
     });
 
     // Create event under Org A using createEvent procedure
@@ -66,13 +66,13 @@ describe('Item 1: Defensive role check on createEvent', () => {
     db = await setupTestDb(workerEnv.DB);
   });
 
-  it('permitted: org:admin role can create an event successfully', async () => {
+  it('permitted: organiser role can create an event successfully', async () => {
     const adminCaller = createTestCaller({
       env: workerEnv,
       db,
       userId: 'user-admin-1',
       orgId: 'org-1',
-      role: 'org:admin',
+      role: 'organiser',
     });
 
     const event = await adminCaller.createEvent({
@@ -130,7 +130,7 @@ describe('Item 1: Defensive role check on createEvent', () => {
       db,
       userId: 'user-cross-A',
       orgId: 'org-A-id',
-      role: 'org:admin',
+      role: 'organiser',
     });
 
     const callerOrgB = createTestCaller({
@@ -138,7 +138,7 @@ describe('Item 1: Defensive role check on createEvent', () => {
       db,
       userId: 'user-cross-B',
       orgId: 'org-B-id',
-      role: 'org:admin',
+      role: 'organiser',
     });
 
     const createdByB = await callerOrgB.createEvent({
