@@ -486,7 +486,7 @@ audit_log
 
 Indexes: `audit_event_type_idx` on `event_type`; `audit_booking_event_idx` on `booking_event_id`. Nullable FKs are intentional — the audit row outlives the rows it references and must never be blocked by a referential integrity failure.
 
-**Why writes come from the tRPC/webhook/cron layer, not from inside the DO**
+**Why writes come from the webhook/cron layer, not from inside the DO**
 
 The Durable Object is single-threaded. Its synchronous critical section (the block between "read available seats" and "insert the reservation row") must complete atomically with no awaited I/O in between. A `db.insert(auditLog)` is a D1 network round-trip; awaiting it inside that block would introduce an `await` across a write, breaking the concurrency guarantee the DO exists to provide — two concurrent `reserveSeat` calls could then interleave, and a third request could read a partially-updated seat count between the DO write and the D1 write.
 
@@ -497,7 +497,7 @@ The correct layer for audit writes is any caller that:
 2. Runs outside the DO's synchronous block
 3. Has enough context to know which event, hold, and user the action relates to
 
-That is the Stripe webhook handler (for confirmation, expiry, payment failure) and the reconciliation cron (for orphan detection). All three call sites follow this pattern and wrap their audit inserts in their own `try/catch` (see §18).
+That is the Stripe webhook handler (for confirmation, expiry, payment failure) and the reconciliation cron (for orphan detection). All four call sites follow this pattern and wrap their audit inserts in their own `try/catch` (see §18).
 
 ---
 

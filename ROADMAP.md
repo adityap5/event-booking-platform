@@ -22,6 +22,12 @@ Deferred items and known gaps that are out of scope for Phase 2 but worth tracki
 
 ## Known weaknesses documented in `TECHNICAL.md §10` (not fixed, tracked here)
 
+### Late payment after hold expiry
+
+A Stripe Checkout Session can remain active after the 15-minute seat hold has expired. If the customer completes payment after the hold has already been released, the Stripe webhook cannot confirm the hold, resulting in a successful payment with no booking and no automatic refund.
+
+**Fix:** Address this as part of the Day 8–11 refund/payment recovery work. The flow should distinguish a payment against an already-released hold from a genuinely orphaned confirmed hold, and apply the appropriate refund/recovery path without compromising the seat-ledger state machine.
+
 ### No user-facing hold-release action
 
 A user who reserves seats and then changes their mind cannot release the hold early — they must wait out the 15-minute expiry. `releaseBooking` was removed as dead code on Day 1 Phase 2 because it had zero frontend callers; the hold-exhaustion cap added the same day means a user with an active pending hold is locked out of re-reserving for up to 15 minutes.
