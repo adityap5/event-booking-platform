@@ -38,6 +38,18 @@ export async function handleUpload(request: Request, env: Env): Promise<Response
     }
     const userId = verifiedToken.sub;
 
+    // Role check: only org members with the 'organiser' role may upload event covers.
+    // The Clerk JWT carries org context in the 'o' claim (o.id = orgId, o.rol = role).
+    // An attendee who is authenticated but not an organiser is rejected here — the
+    // rate limiter and R2 writes are not reached, so there is no storage cost.
+    // 'organiser' matches the role string used in requireOrganiserRole() for createEvent.
+    const claims = verifiedToken as unknown as { o?: { id?: string; rol?: string } };
+    const orgId = claims.o?.id ?? null;
+    const role = claims.o?.rol ?? null;
+    if (!orgId || role !== 'organiser') {
+      return new Response('Forbidden: only organisers may upload event covers.', { status: 403 });
+    }
+
     // Rate limit: 5 cover image uploads per userId per 60 seconds (tighter limit to protect R2 storage from flood uploads)
     const rateLimiter = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(userId));
     const { allowed } = await rateLimiter.checkLimit('uploadEventCover', 5, 60_000);

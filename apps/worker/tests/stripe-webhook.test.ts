@@ -151,4 +151,56 @@ describe('handleStripeWebhook HTTP handler', () => {
     const text = await res?.text();
     expect(text).toContain('Orphaned hold — needs reconciliation');
   });
+
+  it('payment_intent.payment_failed: releases the hold in the DO and returns 200', async () => {
+    const eventId = 'webhook-event-failed';
+    const userId = 'webhook-user-failed';
+
+    await db.insert(schema.events).values({
+      id: eventId,
+      organisationId: 'org-1',
+      name: 'Failed Payment Event',
+      date: new Date(Date.now() + 86400000),
+      totalSeats: 10,
+      pricePerSeat: 1000,
+    });
+
+    const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+    await stub.initialize(10);
+    const hold = await stub.reserveSeat(userId, 2);
+
+    // Verify hold is pending before firing the webhook
+    const holdBefore = await stub.getHold(hold.reservationId);
+    expect(holdBefore?.status).toBe('pending');
+
+    const payload = {
+      id: 'evt_test_failed',
+      type: 'payment_intent.payment_failed',
+      data: {
+        object: {
+          id: 'pi_webhook_failed',
+          amount_received: 0,
+          metadata: {
+            holdId: hold.reservationId,
+            eventId,
+          },
+        },
+      },
+    };
+
+    const req = await createSignedRequest(payload);
+    const res = await handleStripeWebhook(req, workerEnv);
+    expect(res?.status).toBe(200);
+
+    // Hold must be released in the DO — releaseSeat sets status = 'released'
+    const holdAfter = await runInDurableObject(stub, (instance: SeatLedger) => {
+      return instance.getHold(hold.reservationId);
+    });
+    expect(holdAfter?.status).toBe('released');
+
+    // Seats must be available again
+    const available = await stub.getAvailableSeats();
+    expect(available).toBe(10); // all 10 back, hold fully released
+  });
 });
+

@@ -8,7 +8,8 @@ vi.mock('@clerk/backend', async (importOriginal) => {
     verifyToken: vi.fn(async (token: string) => {
       if (token.startsWith('valid-test-token')) {
         const sub = token === 'valid-test-token' ? 'user_upload_test_123' : token.replace('valid-test-token-', 'user_upload_test_');
-        return { sub };
+        // Include org claim so the organiser role check in handleUpload passes
+        return { sub, o: { id: 'test-org-1', rol: 'organiser' } };
       }
       throw new Error('Invalid token');
     }),

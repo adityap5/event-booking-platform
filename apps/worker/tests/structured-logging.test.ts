@@ -211,9 +211,10 @@ describe('Day 6 Structured Logging & Observability Groundwork', () => {
       const consoleSpy = vi.spyOn(console, 'log');
       const userId = 'user_upload_test_ratelimit';
 
-      // Mock Clerk verifyToken inside upload handler path
+      // Mock Clerk verifyToken inside upload handler path — include org claim so the
+      // organiser role check passes and the test can exercise the rate-limit path
       const clerkMock = await import('@clerk/backend');
-      vi.spyOn(clerkMock, 'verifyToken').mockResolvedValue({ sub: userId } as any);
+      vi.spyOn(clerkMock, 'verifyToken').mockResolvedValue({ sub: userId, o: { id: 'test-org-1', rol: 'organiser' } } as any);
 
       for (let i = 0; i < 5; i++) {
         const formData = new FormData();

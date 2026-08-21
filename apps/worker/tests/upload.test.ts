@@ -10,7 +10,12 @@ vi.mock('@clerk/backend', async (importOriginal) => {
     verifyToken: vi.fn(async (token: string) => {
       if (token.startsWith('valid-test-token')) {
         const sub = token === 'valid-test-token' ? 'user_upload_test_123' : token.replace('valid-test-token-', 'user_upload_test_');
-        return { sub };
+        // Return org claim so the organiser role check passes for all valid organiser tokens
+        return { sub, o: { id: 'test-org-1', rol: 'organiser' } };
+      }
+      if (token === 'valid-attendee-token') {
+        // Authenticated attendee — no org membership in JWT; should be rejected by role check
+        return { sub: 'user_attendee_123' };
       }
       throw new Error('Invalid token');
     }),
@@ -148,5 +153,21 @@ describe('handleUpload HTTP handler magic byte inspection & rate limiting', () =
     expect(res?.status).toBe(400);
     const body = await res?.text();
     expect(body).toBe('Malformed request body');
+  });
+
+  it('role check: authenticated attendee (no org claim in JWT) is rejected with 403 before rate limiter or R2', async () => {
+    // 'valid-attendee-token' resolves to a user with no 'o' claim — authenticated but not an organiser
+    const req = await createUploadRequest(
+      Buffer.from([0xFF, 0xD8, 0xFF, 0xE0]), // valid JPEG magic bytes
+      'photo.jpg',
+      'image/jpeg',
+      'valid-attendee-token'
+    );
+
+    const res = await handleUpload(req, workerEnv);
+
+    expect(res?.status).toBe(403);
+    const body = await res?.text();
+    expect(body).toContain('only organisers may upload');
   });
 });
