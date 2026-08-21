@@ -6,7 +6,13 @@ import { createAuthenticatedTRPCClient } from '../lib/trpc';
 // useSeatCount — live seat count via WebSocket (signed-in users only)
 // ---------------------------------------------------------------------------
 
-const WS_URL = 'wss://event-booking-worker.aditya29.workers.dev/ws';
+// WebSocket URL is derived from the tRPC base URL: same origin, wss:// protocol, /ws path.
+// This keeps the worker origin in one place (NEXT_PUBLIC_TRPC_URL in .env.local / wrangler vars)
+// so a URL change requires updating only one value, not two.
+const WS_URL = process.env.NEXT_PUBLIC_TRPC_URL!
+  .replace(/\/trpc$/, '')
+  .replace(/^https:/, 'wss:')
+  + '/ws';
 
 export function useSeatCount(eventId: string): number | null {
   const { isSignedIn, getToken } = useAuth();

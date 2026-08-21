@@ -6,7 +6,8 @@ import { RequireOrgAuth } from '../../components/RequireOrgAuth';
 import { createAuthenticatedTRPCClient } from '../../lib/trpc';
 import styles from './create.module.css';
 
-const UPLOAD_URL = 'https://event-booking-worker.aditya29.workers.dev/upload/event-cover';
+// Upload URL is derived from the tRPC base URL so the worker origin stays in one place.
+const UPLOAD_URL = process.env.NEXT_PUBLIC_TRPC_URL!.replace(/\/trpc$/, '') + '/upload/event-cover';
 const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
 

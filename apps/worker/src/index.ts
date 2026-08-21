@@ -22,6 +22,10 @@ export type Env = {
   CLERK_WEBHOOK_SECRET: string;
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
+  // Public deployed URLs — set as wrangler vars (non-secret), used to build
+  // absolute image URLs and Stripe redirect URLs without hardcoding them in source.
+  WORKER_URL: string;
+  WEB_APP_URL: string;
   DB: D1Database;
   SEAT_LEDGER: DurableObjectNamespace<SeatLedger>;
   EVENT_COVERS: R2Bucket;        

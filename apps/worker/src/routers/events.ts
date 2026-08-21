@@ -181,7 +181,7 @@ export const eventsRouter = {
               });
               await ctx.env.EVENT_COVERS.delete(input.tempImageKey);
 
-              coverImageUrl = `https://event-booking-worker.aditya29.workers.dev/images/events/${eventId}/cover.${ext}`;
+              coverImageUrl = `${ctx.env.WORKER_URL}/images/events/${eventId}/cover.${ext}`;
             }
           } catch (err) {
             // R2 error must not block event creation — log and continue with no image

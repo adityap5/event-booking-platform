@@ -342,7 +342,6 @@ This required a chain of supporting fixes, each worth knowing about if touching 
 - Reconciliation job implemented; automatic healing remains deferred. The job detects confirmed DO holds without corresponding D1 bookings and raises an audit/Sentry alert, but deliberately does not create or repair booking rows.
 - **`seat-ledger.ts` uses raw SQL, not Drizzle** — see point 2, deliberately deferred alongside its structural modularisation.
 - **`apps/worker/src/router.ts` and `index.ts` have been split into `routers/`, `handlers/`, and `procedures.ts`; `seat-ledger.ts` and the web-app have not yet received the same treatment** — see `ROADMAP.md`.
-- **Several URLs are still hardcoded** (worker's own public URL inside `createEvent`'s image URL construction and `createCheckoutSession`'s Stripe redirect URLs; the frontend's WebSocket URL and image-upload URL) rather than sourced from environment configuration — functional today, but brittle if either app's deployed URL ever changes. See `ROADMAP.md`.
 - **No user-facing way to release a pending hold.** `releaseBooking` was removed Day 1 Phase 2 as dead code (zero callers at the time) — but it was the only path a user could ever voluntarily free their own hold. Combined with the same day's hold-exhaustion fix (§2c, reject-on-duplicate), a user who reserves seats and then changes their mind is now locked out of reserving again for up to 15 minutes, with no way to hurry it along. `booking/cancelled.tsx` (where Stripe sends users who back out of checkout) is purely informational and does not call `releaseSeat`. Fix: a minimal ownership-checked `releaseHold` procedure, wired to a "change seat count" action in the booking UI.
 - **`getPublicEvent`'s cached metadata is never invalidated on event update.** The 5-minute KV cache described in §6 had exactly one invalidation path, `invalidateEventCache` — never called anywhere in the frontend, confirmed by grep before it was removed as dead code alongside `whoami`/`getEvent`/etc. on Day 1 Phase 2. Net effect, present since before that cleanup: editing an event's name/description/price does not update what public visitors see for up to 5 minutes; the cleanup didn't introduce this, it just removed the never-used procedure that was theoretically supposed to prevent it. Fix: whichever mutation updates an event row should call `ctx.env.EVENT_CACHE.delete(...)` inline, immediately after the D1 write succeeds — not via a separately exposed procedure the frontend has to remember to call.
 
@@ -498,7 +497,7 @@ The correct layer for audit writes is any caller that:
 2. Runs outside the DO's synchronous block
 3. Has enough context to know which event, hold, and user the action relates to
 
-That is the tRPC procedure layer (for hold creation), the Stripe webhook handler (for confirmation, expiry, payment failure), and the reconciliation cron (for orphan detection). All three call sites follow this pattern and wrap their audit inserts in their own `try/catch` (see §17).
+That is the Stripe webhook handler (for confirmation, expiry, payment failure) and the reconciliation cron (for orphan detection). All three call sites follow this pattern and wrap their audit inserts in their own `try/catch` (see §18).
 
 ---
 

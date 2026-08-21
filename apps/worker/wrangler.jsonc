@@ -5,6 +5,13 @@
   "main": "src/index.ts",
  "compatibility_date": "2026-07-29",
   "compatibility_flags": ["nodejs_als"],
+
+  // ── Public URL vars (non-secret; used to build absolute URLs in routers) ──
+  // Update these if either app's deployed URL ever changes.
+  "vars": {
+    "WORKER_URL": "https://event-booking-worker.aditya29.workers.dev",
+    "WEB_APP_URL": "https://event-booking-web.aditya29.workers.dev"
+  },
   "observability": {
   "enabled": true,
   "logs": {

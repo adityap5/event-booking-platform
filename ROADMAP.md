@@ -34,13 +34,6 @@ The 5-minute KV cache for public event metadata is never explicitly invalidated 
 
 **Fix:** whichever mutation updates an event row should call `ctx.env.EVENT_CACHE.delete(eventId)` inline after the D1 write succeeds — not via a separately exposed procedure.
 
-
-### Hardcoded URLs
-
-Several URLs are hardcoded rather than sourced from environment configuration: the worker's own public URL (in `createEvent`'s image URL construction and `createCheckoutSession`'s Stripe redirect URLs) and the frontend's WebSocket URL and image-upload URL.
-
-**Fix:** move these into environment variables in `wrangler.jsonc` / `.dev.vars` and read them from `env` at runtime. Required before either app's deployed URL could ever change.
-
 ### Integration stub payloads
 
 `dispatchEmailConfirmation` and `dispatchCalendarInvite` in the `'confirmed'` webhook branch use placeholder values (`eventId` instead of event name, `Date.now()` instead of real event date). See §8 in `TECHNICAL.md`.

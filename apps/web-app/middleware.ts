@@ -1,6 +1,10 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
+// CSP URLs are hardcoded here because Next.js middleware runs at the edge
+// before any NEXT_PUBLIC_* env vars are injected — process.env is not available
+// in this file. If the worker URL changes, update img-src and connect-src below
+// and NEXT_PUBLIC_TRPC_URL in .env.local / wrangler.jsonc vars together.
 const CSP_POLICY = [
   "default-src 'self'",
   "script-src 'self' https://saved-foxhound-17.clerk.accounts.dev",

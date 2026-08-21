@@ -90,8 +90,8 @@ export const paymentsRouter = {
             userId: ctx.userId,
           },
         },
-        success_url: 'https://event-booking-web.aditya29.workers.dev/booking/success?session_id={CHECKOUT_SESSION_ID}',
-        cancel_url: 'https://event-booking-web.aditya29.workers.dev/booking/cancelled',
+        success_url: `${ctx.env.WEB_APP_URL}/booking/success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${ctx.env.WEB_APP_URL}/booking/cancelled`,
       });
 
       return { sessionUrl: session.url };
