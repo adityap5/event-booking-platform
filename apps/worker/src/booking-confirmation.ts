@@ -61,11 +61,12 @@ export type ConfirmBookingFromPaymentResult =
   // confirmed the seat on the DO and then failed before (or during) the
   // booking insert — attendee lookup failure, D1 write error, worker crash,
   // etc. This is a genuine reconciliation gap: the seat is gone from the DO's
-  // perspective but no booking exists anywhere. While getHold(holdId) exists
-  // for point lookups on the DO, automated self-healing is intentionally
+  // perspective but no booking exists anywhere. While getHold(holdId) and
+  // listConfirmedHolds() exist on the DO, automated self-healing is intentionally
   // deferred; orphaned holds are surfaced loudly and caught by the Day 7
-  // periodic reconciliation job for alerting and manual intervention.
+  // periodic reconciliation job (using listConfirmedHolds()) for alerting and manual intervention.
   | { outcome: 'orphaned_hold'; holdId: string; eventId: string };
+
 
 
 /**

@@ -81,12 +81,20 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
 
         case 'hold_expired':
           console.warn('payment_intent.succeeded: HOLD_EXPIRED — releasing hold', { holdId, eventId });
-          await db.insert(schema.auditLog).values({
-            eventType: 'hold_released_explicit',
-            holdId,
-            bookingEventId: eventId,
-            detail: JSON.stringify({ reason: 'hold_expired' }),
-          });
+          try {
+            await db.insert(schema.auditLog).values({
+              eventType: 'hold_released_explicit',
+              holdId,
+              bookingEventId: eventId,
+              detail: JSON.stringify({ reason: 'hold_expired' }),
+            });
+          } catch (auditErr: unknown) {
+            console.error('Failed to write audit_log for hold_expired:', auditErr);
+            Sentry.captureMessage('Failed to write audit_log for hold_expired', {
+              level: 'warning',
+              extra: { holdId, eventId, error: auditErr instanceof Error ? auditErr.message : String(auditErr) },
+            });
+          }
           return new Response('', { status: 200 });
 
         case 'event_not_found':
@@ -163,17 +171,30 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
         case 'confirmed': {
           const { booking, attendee, seatCount } = result;
 
-          await db.insert(schema.auditLog).values({
-            eventType: 'booking_confirmed',
-            holdId,
-            bookingEventId: eventId,
-            userId: attendee.userId,
-            detail: JSON.stringify({
-              bookingId: booking.id,
-              seatCount,
-              amountReceivedPence: paymentIntent.amount_received,
-            }),
-          });
+          try {
+            await db.insert(schema.auditLog).values({
+              eventType: 'booking_confirmed',
+              holdId,
+              bookingEventId: eventId,
+              userId: attendee.userId,
+              detail: JSON.stringify({
+                bookingId: booking.id,
+                seatCount,
+                amountReceivedPence: paymentIntent.amount_received,
+              }),
+            });
+          } catch (auditErr: unknown) {
+            console.error('Failed to write audit_log for booking_confirmed:', auditErr);
+            Sentry.captureMessage('Failed to write audit_log for booking_confirmed', {
+              level: 'warning',
+              extra: {
+                holdId,
+                eventId,
+                bookingId: booking.id,
+                error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+              },
+            });
+          }
 
           // Fire-and-forget integration stubs.
           // Errors are swallowed — a failed email must not cause a non-200 response,
@@ -232,15 +253,24 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
         .set({ status: 'cancelled' })
         .where(eq(schema.bookings.holdId, holdId));
 
-      await db.insert(schema.auditLog).values({
-        eventType: 'hold_released_explicit',
-        holdId,
-        bookingEventId: eventId,
-        detail: JSON.stringify({ reason: 'payment_failed' }),
-      });
+      try {
+        await db.insert(schema.auditLog).values({
+          eventType: 'hold_released_explicit',
+          holdId,
+          bookingEventId: eventId,
+          detail: JSON.stringify({ reason: 'payment_failed' }),
+        });
+      } catch (auditErr: unknown) {
+        console.error('Failed to write audit_log for payment_failed:', auditErr);
+        Sentry.captureMessage('Failed to write audit_log for payment_failed', {
+          level: 'warning',
+          extra: { holdId, eventId, error: auditErr instanceof Error ? auditErr.message : String(auditErr) },
+        });
+      }
 
       return new Response('', { status: 200 });
     }
+
 
 
     // Acknowledge and ignore all other event types

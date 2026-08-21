@@ -64,27 +64,33 @@ export async function runReconciliation(env: Env): Promise<ReconciliationSummary
       // Orphan detected: DO shows confirmed, hold is past expiry, but D1 has no booking row
       orphansDetected++;
 
-      // Recover point-lookup details from DO via getHold
-      const holdDetails = await stub.getHold(hold.id);
-      const userId = holdDetails?.userId ?? hold.userId;
-      const seatCount = holdDetails?.seatCount ?? hold.seatCount;
-
       const orphanDetail = {
         holdId: hold.id,
         eventId: event.id,
-        userId,
-        seatCount,
+        userId: hold.userId,
+        seatCount: hold.seatCount,
         expiresAt: hold.expiresAt,
       };
 
-      await db.insert(schema.auditLog).values({
-        eventType: 'reconciliation_orphan_detected',
-        holdId: hold.id,
-        bookingEventId: event.id,
-        userId,
-        orgId: event.organisationId,
-        detail: JSON.stringify(orphanDetail),
-      });
+      try {
+        await db.insert(schema.auditLog).values({
+          eventType: 'reconciliation_orphan_detected',
+          holdId: hold.id,
+          bookingEventId: event.id,
+          userId: hold.userId,
+          orgId: event.organisationId,
+          detail: JSON.stringify(orphanDetail),
+        });
+      } catch (auditErr: unknown) {
+        console.error('Failed to write audit_log for reconciliation_orphan_detected:', auditErr);
+        Sentry.captureMessage('Failed to write audit_log for reconciliation_orphan_detected', {
+          level: 'warning',
+          extra: {
+            ...orphanDetail,
+            error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+          },
+        });
+      }
 
       Sentry.captureMessage('Reconciliation: ORPHANED HOLD detected', {
         level: 'error',
@@ -96,8 +102,8 @@ export async function runReconciliation(env: Env): Promise<ReconciliationSummary
         action: 'reconciliation_orphan_detected',
         holdId: hold.id,
         eventId: event.id,
-        userId,
-        seatCount,
+        userId: hold.userId,
+        seatCount: hold.seatCount,
       });
     }
   }
@@ -108,3 +114,4 @@ export async function runReconciliation(env: Env): Promise<ReconciliationSummary
     orphansDetected,
   };
 }
+

@@ -119,9 +119,8 @@ export const auditLog = sqliteTable(
   }
 );
 
-export const auditLogs = auditLog;
-
 // ── Relations (Drizzle ORM Object Relational API) ───────────────────────────────────
+
 
 export const organisationsRelations = relations(organisations, ({ many }) => ({
   events: many(events),
