@@ -97,6 +97,30 @@ export const bookings = sqliteTable(
   }
 );
 
+export const auditLog = sqliteTable(
+  'audit_log',
+  {
+    id: text('id').primaryKey().$defaultFn(generateId),
+    eventType: text('event_type').notNull(),
+    holdId: text('hold_id'),
+    bookingEventId: text('booking_event_id'),
+    userId: text('user_id'),
+    orgId: text('org_id'),
+    detail: text('detail'),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .default(sql`(strftime('%s', 'now'))`),
+  },
+  (table) => {
+    return [
+      index('audit_event_type_idx').on(table.eventType),
+      index('audit_booking_event_idx').on(table.bookingEventId),
+    ];
+  }
+);
+
+export const auditLogs = auditLog;
+
 // ── Relations (Drizzle ORM Object Relational API) ───────────────────────────────────
 
 export const organisationsRelations = relations(organisations, ({ many }) => ({
@@ -125,3 +149,4 @@ export const bookingsRelations = relations(bookings, ({ one }) => ({
     references: [attendees.id],
   }),
 }));
+

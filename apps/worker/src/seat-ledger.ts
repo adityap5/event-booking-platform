@@ -165,6 +165,19 @@ class SeatLedgerBase extends DurableObject<Env> {
     };
   }
 
+  async listConfirmedHolds(): Promise<{ id: string; userId: string; seatCount: number; expiresAt: number }[]> {
+    const rows = this.ctx.storage.sql.exec(
+      "SELECT id, user_id, seat_count, expires_at FROM reservations WHERE status = 'confirmed'"
+    ).toArray();
+    return rows.map((row) => ({
+      id: row.id as string,
+      userId: row.user_id as string,
+      seatCount: row.seat_count as number,
+      expiresAt: row.expires_at as number,
+    }));
+  }
+
+
   async confirmSeat(holdId: string): Promise<{ userId: string; seatCount: number }> {
     const holds = this.ctx.storage.sql.exec("SELECT user_id, seat_count, status, expires_at FROM reservations WHERE id = ?", holdId).toArray();
     if (holds.length === 0) {

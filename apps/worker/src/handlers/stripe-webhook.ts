@@ -81,6 +81,12 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
 
         case 'hold_expired':
           console.warn('payment_intent.succeeded: HOLD_EXPIRED — releasing hold', { holdId, eventId });
+          await db.insert(schema.auditLog).values({
+            eventType: 'hold_released_explicit',
+            holdId,
+            bookingEventId: eventId,
+            detail: JSON.stringify({ reason: 'hold_expired' }),
+          });
           return new Response('', { status: 200 });
 
         case 'event_not_found':
@@ -157,6 +163,18 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
         case 'confirmed': {
           const { booking, attendee, seatCount } = result;
 
+          await db.insert(schema.auditLog).values({
+            eventType: 'booking_confirmed',
+            holdId,
+            bookingEventId: eventId,
+            userId: attendee.userId,
+            detail: JSON.stringify({
+              bookingId: booking.id,
+              seatCount,
+              amountReceivedPence: paymentIntent.amount_received,
+            }),
+          });
+
           // Fire-and-forget integration stubs.
           // Errors are swallowed — a failed email must not cause a non-200 response,
           // which would trigger Stripe to retry the webhook and double-book.
@@ -214,8 +232,16 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
         .set({ status: 'cancelled' })
         .where(eq(schema.bookings.holdId, holdId));
 
+      await db.insert(schema.auditLog).values({
+        eventType: 'hold_released_explicit',
+        holdId,
+        bookingEventId: eventId,
+        detail: JSON.stringify({ reason: 'payment_failed' }),
+      });
+
       return new Response('', { status: 200 });
     }
+
 
     // Acknowledge and ignore all other event types
     return new Response('', { status: 200 });

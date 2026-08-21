@@ -13,8 +13,10 @@ import { handleClerkWebhook } from './handlers/clerk-webhook.js';
 import { handleStripeWebhook } from './handlers/stripe-webhook.js';
 import { handleUpload } from './handlers/upload.js';
 import { handleWebSocketUpgrade } from './handlers/websocket.js';
+import { runReconciliation } from './reconciliation.js';
 
 export type Env = {
+
   CLERK_SECRET_KEY: string;
   CLERK_JWT_KEY: string;
   CLERK_WEBHOOK_SECRET: string;
@@ -162,5 +164,10 @@ export default Sentry.withSentry(
       applyWorkerSecurityHeaders(response);
       return response;
     },
+    async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+      await runReconciliation(env);
+    },
+
   } satisfies ExportedHandler<Env>,
 );
+

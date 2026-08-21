@@ -65,7 +65,64 @@ describe('SeatLedger DO & reserveSeat regression tests', () => {
     });
   });
 
+  describe('listConfirmedHolds() zero mutation', () => {
+    it('performs zero mutation on reservations table and schedules no alarm', async () => {
+      const eventId = 'test-listconfirmedholds-zero-mutation';
+      const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+      stub.initialize(10);
+
+      const hold = await stub.reserveSeat('user-1', 2);
+      await stub.confirmSeat(hold.reservationId);
+
+      // Read reservations row directly before listConfirmedHolds()
+      const beforeState = await runInDurableObject(stub, (instance: SeatLedger) => {
+        const rows = (instance as any).ctx.storage.sql.exec(
+          'SELECT * FROM reservations WHERE id = ?',
+          hold.reservationId
+        ).toArray();
+        return {
+          row: rows[0],
+        };
+      });
+
+      // Get alarm state before listConfirmedHolds()
+      const alarmBefore = await runInDurableObject(stub, async (instance: SeatLedger) => {
+        return await (instance as any).ctx.storage.getAlarm();
+      });
+
+      // Call listConfirmedHolds()
+      const confirmedHolds = await stub.listConfirmedHolds();
+      expect(confirmedHolds).toHaveLength(1);
+      expect(confirmedHolds[0]?.id).toBe(hold.reservationId);
+      expect(confirmedHolds[0]?.userId).toBe('user-1');
+      expect(confirmedHolds[0]?.seatCount).toBe(2);
+
+      // Read reservations row directly after listConfirmedHolds()
+      const afterState = await runInDurableObject(stub, (instance: SeatLedger) => {
+        const rows = (instance as any).ctx.storage.sql.exec(
+          'SELECT * FROM reservations WHERE id = ?',
+          hold.reservationId
+        ).toArray();
+        return {
+          row: rows[0],
+        };
+      });
+
+      // Get alarm state after listConfirmedHolds()
+      const alarmAfter = await runInDurableObject(stub, async (instance: SeatLedger) => {
+        return await (instance as any).ctx.storage.getAlarm();
+      });
+
+      // Assert row is byte-identical
+      expect(JSON.stringify(afterState.row)).toBe(JSON.stringify(beforeState.row));
+
+      // Assert alarm is unchanged
+      expect(alarmAfter).toBe(alarmBefore);
+    });
+  });
+
   describe('reserveSeat pending-hold cap', () => {
+
     it('blocks a second pending hold for the same user with CONFLICT / TOO_MANY_PENDING_HOLDS', async () => {
       const eventId = 'test-hold-cap-event';
 

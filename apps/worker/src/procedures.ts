@@ -16,6 +16,7 @@ export interface WorkerEnv {
       confirmSeat: (holdId: string) => Promise<{ userId: string; seatCount: number }>;
       releaseSeat: (holdId: string) => Promise<void>;
       getHold: (holdId: string) => Promise<{ userId: string; seatCount: number; status: string; expiresAt: number } | null>;
+      listConfirmedHolds: () => Promise<{ id: string; userId: string; seatCount: number; expiresAt: number }[]>;
       mintTicket: (userId: string, orgId: string | null, eventId: string) => Promise<string>;
     };
   };
