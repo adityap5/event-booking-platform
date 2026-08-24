@@ -145,7 +145,7 @@ export async function handleUpload(request: Request, env: Env): Promise<Response
     }
 
     const key = url.pathname.slice('/images/'.length);
-    if (!key) {
+    if (!key || !key.startsWith('events/')) {
       return new Response('Not Found', { status: 404 });
     }
 

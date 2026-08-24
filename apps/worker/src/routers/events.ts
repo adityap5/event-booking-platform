@@ -130,7 +130,12 @@ export const eventsRouter = {
     .input(z.object({
       name: z.string().min(1).max(200),
       description: z.string().max(2000).optional(),
-      date: z.number(),
+      date: z.number()
+        .int()
+        .finite()
+        .refine((value) => value > Date.now() && Number.isFinite(new Date(value).getTime()), {
+          message: 'Event date must be in the future',
+        }),
       totalSeats: z.number().int().min(1).max(100000),
       // Sanity bound (£100,000.00 stored in cents/pence), not a business rule set in stone.
       pricePerSeat: z.number().int().min(0).max(100_000_00),

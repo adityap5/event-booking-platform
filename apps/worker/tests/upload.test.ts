@@ -171,3 +171,70 @@ describe('handleUpload HTTP handler magic byte inspection & rate limiting', () =
     expect(body).toContain('only organisers may upload');
   });
 });
+
+describe('GET /images/* R2 key namespace access boundary', () => {
+  const workerEnv = env as unknown as Env;
+  const sampleJpeg = Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01]);
+
+  it('1. temporary upload object in uploads/tmp/ is NOT publicly accessible through /images/ (returns 404)', async () => {
+    const tempKey = 'uploads/tmp/test-user/test-temp-id.jpg';
+    await workerEnv.EVENT_COVERS.put(tempKey, sampleJpeg, {
+      httpMetadata: { contentType: 'image/jpeg' },
+    });
+
+    const req = new Request(`https://worker.dev/images/${tempKey}`, {
+      method: 'GET',
+    });
+    const res = await handleUpload(req, workerEnv);
+
+    expect(res?.status).toBe(404);
+    const body = await res?.text();
+    expect(body).toBe('Not Found');
+  });
+
+  it('2. finalized event cover in events/ remains publicly accessible through /images/ (returns 200 and Content-Type)', async () => {
+    const eventKey = 'events/test-event/cover.jpg';
+    await workerEnv.EVENT_COVERS.put(eventKey, sampleJpeg, {
+      httpMetadata: { contentType: 'image/jpeg' },
+    });
+
+    const req = new Request(`https://worker.dev/images/${eventKey}`, {
+      method: 'GET',
+    });
+    const res = await handleUpload(req, workerEnv);
+
+    expect(res?.status).toBe(200);
+    expect(res?.headers.get('Content-Type')).toBe('image/jpeg');
+    expect(res?.headers.get('Cache-Control')).toBe('public, max-age=31536000, immutable');
+    const bytes = new Uint8Array(await res!.arrayBuffer());
+    expect(bytes).toEqual(new Uint8Array(sampleJpeg));
+  });
+
+  it('3. arbitrary non-event R2 keys are rejected with 404 before fetching', async () => {
+    const randomKey = 'random/file.jpg';
+    await workerEnv.EVENT_COVERS.put(randomKey, sampleJpeg, {
+      httpMetadata: { contentType: 'image/jpeg' },
+    });
+
+    const req = new Request(`https://worker.dev/images/${randomKey}`, {
+      method: 'GET',
+    });
+    const res = await handleUpload(req, workerEnv);
+
+    expect(res?.status).toBe(404);
+    const body = await res?.text();
+    expect(body).toBe('Not Found');
+  });
+
+  it('4. empty key or root /images/ request returns 404', async () => {
+    const req = new Request('https://worker.dev/images/', {
+      method: 'GET',
+    });
+    const res = await handleUpload(req, workerEnv);
+
+    expect(res?.status).toBe(404);
+    const body = await res?.text();
+    expect(body).toBe('Not Found');
+  });
+});
+
