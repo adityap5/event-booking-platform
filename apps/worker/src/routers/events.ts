@@ -1,5 +1,5 @@
 import { protectedProcedure } from '@event-booking/trpc';
-import { requireActiveOrganisation, requireOrganiserRole } from '@event-booking/permissions';
+import { authorizeOrganiserAccess, requireActiveOrganisation, requireOrganiserRole } from '@event-booking/permissions';
 import { z } from 'zod';
 import * as schema from '@event-booking/shared';
 import { events } from '@event-booking/shared';
@@ -8,6 +8,30 @@ import { TRPCError } from '@trpc/server';
 import { workerProcedure, publicWorkerProcedure } from '../procedures.js';
 import * as Sentry from '@sentry/cloudflare';
 import { logStructured } from '../logger.js';
+
+export function getPublicEventCacheKey(eventId: string): string {
+  return `event:${eventId}`;
+}
+
+export function getPublicEventsCacheKey(): string {
+  return 'events:public';
+}
+
+async function safeInvalidateCache(
+  env: { EVENT_CACHE: { delete: (key: string) => Promise<void> } },
+  ...keys: string[]
+): Promise<void> {
+  for (const key of keys) {
+    try {
+      await env.EVENT_CACHE.delete(key);
+    } catch (err) {
+      console.error(`[EVENT_CACHE] Failed to delete cache key "${key}":`, err);
+      Sentry.captureException(err, {
+        extra: { cacheKey: key, action: 'cache_invalidation_failure' },
+      });
+    }
+  }
+}
 
 export const eventsRouter = {
   getAvailableSeats: publicWorkerProcedure
@@ -36,7 +60,7 @@ export const eventsRouter = {
     .input(z.object({ eventId: z.string() }))
     .query(async ({ input, ctx }) => {
       // Check KV cache first — avoids D1 round-trip on hot event pages
-      const cacheKey = `event:${input.eventId}`;
+      const cacheKey = getPublicEventCacheKey(input.eventId);
       const cached = await ctx.env.EVENT_CACHE.get(cacheKey);
       if (cached !== null) return JSON.parse(cached) as {
         id: string; name: string; description: string | null; date: number;
@@ -65,7 +89,7 @@ export const eventsRouter = {
         id: event.id,
         name: event.name,
         description: event.description,
-       date: event.date instanceof Date ? event.date.getTime() : Number(event.date), // ← force to ms timestamp
+        date: event.date instanceof Date ? event.date.getTime() : Number(event.date), // ← force to ms timestamp
         totalSeats: event.totalSeats,
         pricePerSeat: event.pricePerSeat,
         coverImageUrl: event.coverImageUrl,
@@ -105,6 +129,19 @@ export const eventsRouter = {
   }),
 
   listPublicEvents: publicWorkerProcedure.query(async ({ ctx }) => {
+    const cacheKey = getPublicEventsCacheKey();
+    const cached = await ctx.env.EVENT_CACHE.get(cacheKey);
+    if (cached !== null) {
+      return JSON.parse(cached) as Array<{
+        id: string;
+        name: string;
+        date: number;
+        totalSeats: number;
+        pricePerSeat: number;
+        coverImageUrl: string | null;
+      }>;
+    }
+
     const now = new Date(Date.now());
 
     const rows = await ctx.db
@@ -120,10 +157,16 @@ export const eventsRouter = {
       .where(gte(events.date, now))
       .orderBy(asc(events.date));
 
-    return rows.map((event) => ({
+    const payload = rows.map((event) => ({
       ...event,
       date: event.date instanceof Date ? event.date.getTime() : Number(event.date),
     }));
+
+    await ctx.env.EVENT_CACHE.put(cacheKey, JSON.stringify(payload), {
+      expirationTtl: 300,
+    });
+
+    return payload;
   }),
 
   createEvent: workerProcedure
@@ -212,6 +255,56 @@ export const eventsRouter = {
         coverImageUrl,
       }).returning({ id: schema.events.id, name: schema.events.name });
 
+      // Invalidate public event list cache after successful D1 insert
+      await safeInvalidateCache(ctx.env, getPublicEventsCacheKey());
+
       return created;
     }),
+
+  updateEvent: workerProcedure
+    .input(z.object({
+      eventId: z.string().min(1),
+      name: z.string().min(1).max(200),
+      description: z.string().max(2000).nullable(),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      requireOrganiserRole(ctx, 'organiser');
+
+      const [existingEvent] = await ctx.db
+        .select({
+          id: events.id,
+          organisationId: events.organisationId,
+        })
+        .from(events)
+        .where(eq(events.id, input.eventId));
+
+      if (!existingEvent) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Event not found' });
+      }
+
+      authorizeOrganiserAccess(ctx, existingEvent.organisationId);
+
+      const [updated] = await ctx.db
+        .update(events)
+        .set({
+          name: input.name,
+          description: input.description,
+        })
+        .where(eq(events.id, input.eventId))
+        .returning({ id: events.id, name: events.name });
+
+      if (!updated) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Event not found' });
+      }
+
+      // Invalidate both event-specific and public list caches after D1 update succeeds
+      await safeInvalidateCache(
+        ctx.env,
+        getPublicEventCacheKey(input.eventId),
+        getPublicEventsCacheKey(),
+      );
+
+      return updated;
+    }),
 };
+

@@ -34,7 +34,7 @@ export async function setupTestDb(d1: D1Database): Promise<DrizzleD1Database<typ
 
   // Seed default organisations so FK constraints on events(organisation_id) pass
   await d1.prepare(
-    "INSERT INTO organisations (id, name, owner_id) VALUES ('test-org-1', 'Test Org 1', 'owner-1'), ('org-1', 'Org 1', 'owner-2'), ('org-A-id', 'Org A', 'owner-A'), ('org-B-id', 'Org B', 'owner-B') ON CONFLICT(id) DO NOTHING"
+    "INSERT INTO organisations (id, name, owner_id) VALUES ('test-org-1', 'Test Org 1', 'owner-1'), ('org-1', 'Org 1', 'owner-2'), ('org-A-id', 'Org A', 'owner-A'), ('org-B-id', 'Org B', 'owner-B'), ('org-cache-1', 'Org Cache 1', 'owner-C1'), ('org-cache-2', 'Org Cache 2', 'owner-C2'), ('org-fail-1', 'Org Fail 1', 'owner-F1') ON CONFLICT(id) DO NOTHING"
   ).run();
 
   return drizzle(d1, { schema });

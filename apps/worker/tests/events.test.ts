@@ -3,6 +3,7 @@ import { env } from 'cloudflare:test';
 import type { Env } from '../src/index.js';
 import { setupTestDb, createTestCaller } from './test-helpers.js';
 import { handleUpload } from '../src/handlers/upload.js';
+import { getPublicEventCacheKey, getPublicEventsCacheKey } from '../src/routers/events.js';
 
 describe('Task 5: Per-organisation isolation', () => {
   let db: Awaited<ReturnType<typeof setupTestDb>>;
@@ -360,5 +361,386 @@ describe('createEvent date input validation', () => {
     ).rejects.toThrow();
   });
 });
+
+describe('listPublicEvents KV Caching and Invalidation', () => {
+  let db: Awaited<ReturnType<typeof setupTestDb>>;
+  const workerEnv = env as unknown as Env;
+
+  beforeEach(async () => {
+    db = await setupTestDb(workerEnv.DB);
+    await workerEnv.EVENT_CACHE.delete(getPublicEventsCacheKey());
+  });
+
+  it('1. first request causes cache miss, queries D1, and stores formatted array in KV with 5-minute TTL', async () => {
+    const orgCaller = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-cache-org',
+      orgId: 'org-cache-1',
+      role: 'organiser',
+    });
+
+    const event = await orgCaller.createEvent({
+      name: 'Cache Test Event 1',
+      date: Date.now() + 86400000,
+      totalSeats: 50,
+      pricePerSeat: 2000,
+    });
+
+    // Ensure list cache is empty before request
+    await workerEnv.EVENT_CACHE.delete(getPublicEventsCacheKey());
+    expect(await workerEnv.EVENT_CACHE.get(getPublicEventsCacheKey())).toBeNull();
+
+    const publicCaller = createTestCaller({ env: workerEnv, db, ip: '192.0.2.1' });
+    const result = await publicCaller.listPublicEvents();
+
+    expect(result.length).toBeGreaterThanOrEqual(1);
+    expect(result.some((e) => e.id === event!.id)).toBe(true);
+
+    // Verify KV cache was populated
+    const cachedRaw = await workerEnv.EVENT_CACHE.get(getPublicEventsCacheKey());
+    expect(cachedRaw).not.toBeNull();
+    const parsedCache = JSON.parse(cachedRaw!);
+    expect(Array.isArray(parsedCache)).toBe(true);
+    expect(parsedCache.some((e: any) => e.id === event!.id)).toBe(true);
+  });
+
+  it('2. second request serves from KV cache without querying D1, matching response shape', async () => {
+    // Pre-populate KV cache with custom mock data to verify cache hit
+    const mockCachedEvents = [
+      {
+        id: 'mock-cached-event-1',
+        name: 'Pre-warmed Cache Event',
+        date: Date.now() + 100000,
+        totalSeats: 25,
+        pricePerSeat: 1500,
+        coverImageUrl: null,
+      },
+    ];
+    await workerEnv.EVENT_CACHE.put(getPublicEventsCacheKey(), JSON.stringify(mockCachedEvents));
+
+    const publicCaller = createTestCaller({ env: workerEnv, db, ip: '192.0.2.2' });
+    const result = await publicCaller.listPublicEvents();
+
+    expect(result).toEqual(mockCachedEvents);
+  });
+
+  it('3. createEvent invalidates events:public cache so subsequent listPublicEvents sees new event', async () => {
+    const orgCaller = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-cache-org-2',
+      orgId: 'org-cache-2',
+      role: 'organiser',
+    });
+
+    // Pre-populate cache
+    const initialCached = [{ id: 'stale-event', name: 'Stale Event', date: Date.now() + 100000, totalSeats: 10, pricePerSeat: 1000, coverImageUrl: null }];
+    await workerEnv.EVENT_CACHE.put(getPublicEventsCacheKey(), JSON.stringify(initialCached));
+
+    // Create a new event
+    const newEvent = await orgCaller.createEvent({
+      name: 'Newly Created Event',
+      date: Date.now() + 86400000,
+      totalSeats: 30,
+      pricePerSeat: 2500,
+    });
+
+    // Verify cache was evicted
+    const cacheAfterCreate = await workerEnv.EVENT_CACHE.get(getPublicEventsCacheKey());
+    expect(cacheAfterCreate).toBeNull();
+
+    // Subsequent call should fetch fresh data including newEvent
+    const publicCaller = createTestCaller({ env: workerEnv, db });
+    const freshList = await publicCaller.listPublicEvents();
+    expect(freshList.some((e) => e.id === newEvent!.id)).toBe(true);
+    expect(freshList.some((e) => e.id === 'stale-event')).toBe(false);
+  });
+});
+
+describe('updateEvent mutation and cache consistency', () => {
+  let db: Awaited<ReturnType<typeof setupTestDb>>;
+  const workerEnv = env as unknown as Env;
+
+  beforeEach(async () => {
+    db = await setupTestDb(workerEnv.DB);
+  });
+
+  it('1. authorized organiser can update name and nullable description of own event in D1', async () => {
+    const orgCaller = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-update-org-1',
+      orgId: 'org-A-id',
+      role: 'organiser',
+    });
+
+    const created = await orgCaller.createEvent({
+      name: 'Original Event Name',
+      description: 'Original Description',
+      date: Date.now() + 86400000,
+      totalSeats: 50,
+      pricePerSeat: 1000,
+    });
+
+    const eventId = created!.id;
+
+    // Update with new name and new description
+    const updated1 = await orgCaller.updateEvent({
+      eventId,
+      name: 'Updated Event Name',
+      description: 'Updated Description',
+    });
+
+    expect(updated1).toEqual({ id: eventId, name: 'Updated Event Name' });
+
+    const fetched1 = await orgCaller.getPublicEvent({ eventId });
+    expect(fetched1.name).toBe('Updated Event Name');
+    expect(fetched1.description).toBe('Updated Description');
+
+    // Update with null description (nullable semantics)
+    const updated2 = await orgCaller.updateEvent({
+      eventId,
+      name: 'Updated Event Name 2',
+      description: null,
+    });
+
+    expect(updated2).toEqual({ id: eventId, name: 'Updated Event Name 2' });
+
+    const fetched2 = await orgCaller.getPublicEvent({ eventId });
+    expect(fetched2.name).toBe('Updated Event Name 2');
+    expect(fetched2.description).toBeNull();
+  });
+
+  it('2. rejects update by organiser from another organisation with FORBIDDEN', async () => {
+    const orgACaller = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-org-A-admin',
+      orgId: 'org-A-id',
+      role: 'organiser',
+    });
+
+    const orgBCaller = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-org-B-admin',
+      orgId: 'org-B-id',
+      role: 'organiser',
+    });
+
+    const created = await orgACaller.createEvent({
+      name: 'Org A Exclusive Event',
+      date: Date.now() + 86400000,
+      totalSeats: 50,
+      pricePerSeat: 1000,
+    });
+
+    await expect(
+      orgBCaller.updateEvent({
+        eventId: created!.id,
+        name: 'Tampered Name',
+        description: 'Tampered Description',
+      })
+    ).rejects.toThrowError(/You do not have permission to modify or view this organisation's resources/);
+  });
+
+  it('3. rejects update by non-admin role (org:member) or caller without orgId with FORBIDDEN', async () => {
+    const orgCaller = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-org-A-admin',
+      orgId: 'org-A-id',
+      role: 'organiser',
+    });
+
+    const memberCaller = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-org-A-member',
+      orgId: 'org-A-id',
+      role: 'org:member',
+    });
+
+    const noOrgCaller = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-no-org',
+      orgId: null,
+      role: null,
+    });
+
+    const created = await orgCaller.createEvent({
+      name: 'Org A Event for Member Test',
+      date: Date.now() + 86400000,
+      totalSeats: 50,
+      pricePerSeat: 1000,
+    });
+
+    await expect(
+      memberCaller.updateEvent({
+        eventId: created!.id,
+        name: 'Member Attempt',
+        description: 'Desc',
+      })
+    ).rejects.toThrowError('You do not have permission to perform this action.');
+
+    await expect(
+      noOrgCaller.updateEvent({
+        eventId: created!.id,
+        name: 'No Org Attempt',
+        description: 'Desc',
+      })
+    ).rejects.toThrowError('You must be an organiser to access this resource.');
+  });
+
+  it('4. throws NOT_FOUND when updating non-existent eventId', async () => {
+    const orgCaller = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-org-A-admin',
+      orgId: 'org-A-id',
+      role: 'organiser',
+    });
+
+    await expect(
+      orgCaller.updateEvent({
+        eventId: 'non-existent-event-id-999',
+        name: 'New Name',
+        description: 'New Desc',
+      })
+    ).rejects.toThrowError('Event not found');
+  });
+
+  it('5. invalidates event:{eventId} and events:public caches after successful D1 update', async () => {
+    const orgCaller = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-update-cache-test',
+      orgId: 'org-1',
+      role: 'organiser',
+    });
+
+    const created = await orgCaller.createEvent({
+      name: 'Initial Event Name',
+      description: 'Initial Desc',
+      date: Date.now() + 86400000,
+      totalSeats: 40,
+      pricePerSeat: 1200,
+    });
+    const eventId = created!.id;
+
+    // Pre-warm both getPublicEvent and listPublicEvents caches
+    const publicCaller = createTestCaller({ env: workerEnv, db });
+    await publicCaller.getPublicEvent({ eventId });
+    await publicCaller.listPublicEvents();
+
+    const eventCacheKey = getPublicEventCacheKey(eventId);
+    const listCacheKey = getPublicEventsCacheKey();
+
+    expect(await workerEnv.EVENT_CACHE.get(eventCacheKey)).not.toBeNull();
+    expect(await workerEnv.EVENT_CACHE.get(listCacheKey)).not.toBeNull();
+
+    // Perform update
+    await orgCaller.updateEvent({
+      eventId,
+      name: 'Renamed Event',
+      description: 'Updated description text',
+    });
+
+    // Assert both caches were evicted
+    expect(await workerEnv.EVENT_CACHE.get(eventCacheKey)).toBeNull();
+    expect(await workerEnv.EVENT_CACHE.get(listCacheKey)).toBeNull();
+
+    // Subsequent public reads return updated data
+    const freshEvent = await publicCaller.getPublicEvent({ eventId });
+    expect(freshEvent.name).toBe('Renamed Event');
+    expect(freshEvent.description).toBe('Updated description text');
+
+    const freshList = await publicCaller.listPublicEvents();
+    const listedEvent = freshList.find((e) => e.id === eventId);
+    expect(listedEvent?.name).toBe('Renamed Event');
+  });
+
+  it('6. input validation requires name and description fields while allowing description to be null', async () => {
+    const orgCaller = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-update-val',
+      orgId: 'org-1',
+      role: 'organiser',
+    });
+
+    // Empty name
+    await expect(
+      orgCaller.updateEvent({
+        eventId: 'event-1',
+        name: '',
+        description: 'Some desc',
+      })
+    ).rejects.toThrow();
+
+    // Missing name
+    await expect(
+      (orgCaller as any).updateEvent({
+        eventId: 'event-1',
+        description: 'Some desc',
+      })
+    ).rejects.toThrow();
+
+    // Missing description
+    await expect(
+      (orgCaller as any).updateEvent({
+        eventId: 'event-1',
+        name: 'Valid Name',
+      })
+    ).rejects.toThrow();
+  });
+});
+
+describe('KV cache failure isolation', () => {
+  let db: Awaited<ReturnType<typeof setupTestDb>>;
+  const workerEnv = env as unknown as Env;
+
+  beforeEach(async () => {
+    db = await setupTestDb(workerEnv.DB);
+  });
+
+  it('allows createEvent and updateEvent to succeed even if EVENT_CACHE.delete throws', async () => {
+    const orgCaller = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-cache-fail-test',
+      orgId: 'org-fail-1',
+      role: 'organiser',
+    });
+
+    // Create event with faulty EVENT_CACHE.delete
+    const originalDelete = workerEnv.EVENT_CACHE.delete;
+    workerEnv.EVENT_CACHE.delete = async () => {
+      throw new Error('KV service temporarily unavailable');
+    };
+
+    try {
+      const created = await orgCaller.createEvent({
+        name: 'Faulty Cache Event',
+        date: Date.now() + 86400000,
+        totalSeats: 50,
+        pricePerSeat: 1000,
+      });
+      expect(created!.id).toBeDefined();
+
+      const updated = await orgCaller.updateEvent({
+        eventId: created!.id,
+        name: 'Faulty Cache Event Renamed',
+        description: 'Desc',
+      });
+      expect(updated!.name).toBe('Faulty Cache Event Renamed');
+    } finally {
+      workerEnv.EVENT_CACHE.delete = originalDelete;
+    }
+  });
+});
+
 
 
