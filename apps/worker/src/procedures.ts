@@ -36,6 +36,8 @@ export interface WorkerEnv {
     };
   };
   EVENT_COVERS: R2Bucket;
+  /** Private bucket for generated PDF tickets — access gated by authenticated getTicket procedure. */
+  EVENT_TICKETS: R2Bucket;
 }
 
 // Create a worker-specific procedure that strongly types the environment

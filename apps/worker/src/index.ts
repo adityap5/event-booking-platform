@@ -28,7 +28,8 @@ export type Env = {
   WEB_APP_URL: string;
   DB: D1Database;
   SEAT_LEDGER: DurableObjectNamespace<SeatLedger>;
-  EVENT_COVERS: R2Bucket;        
+  EVENT_COVERS: R2Bucket;
+  EVENT_TICKETS: R2Bucket; /** Private bucket for generated PDF tickets — access gated by authenticated getTicket procedure. */
   EVENT_CACHE: KVNamespace;  
   RATE_LIMITER: DurableObjectNamespace<RateLimiter>;
   SENTRY_DSN: string;

@@ -1,9 +1,11 @@
 import Stripe from 'stripe';
 import { drizzle } from 'drizzle-orm/d1';
 import * as schema from '@event-booking/shared';
+import { events } from '@event-booking/shared';
 import { eq } from 'drizzle-orm';
 import { dispatchEmailConfirmation, dispatchCalendarInvite } from '../integrations.js';
 import { confirmBookingFromPayment } from '../booking-confirmation.js';
+import { generateTicketPdf } from '../ticket-pdf.js';
 import type { Env } from '../index.js';
 import * as Sentry from '@sentry/cloudflare';
 import { logStructured } from '../logger.js';
@@ -196,39 +198,105 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
             });
           }
 
-          // Fire-and-forget integration stubs.
-          // Errors are swallowed — a failed email must not cause a non-200 response,
-          // which would trigger Stripe to retry the webhook and double-book.
+          // Fetch real event metadata (name + date) for integration payloads and ticket.
+          // The event is guaranteed to exist here (already checked before confirmSeat),
+          // but the lookup is in its own try/catch so a transient D1 error never causes
+          // a non-200 response or introduces fake fallback data.
+          let realEventName: string | null = null;
+          let realEventDate: number | null = null;
           try {
-            await dispatchEmailConfirmation({
-              idempotencyKey: holdId,
-              to: attendee.email,
-              attendeeName: attendee.name,
-              eventName: eventId,        // stub: replace with real event name lookup
-              eventDate: Date.now(),     // stub: replace with real event date lookup
-              seatCount,
-              bookingId: booking.id,
-              totalPaidPence: paymentIntent.amount_received,
-            });
-            await dispatchCalendarInvite({ // organizerEmail intentionally omitted — no organiser-email lookup exists yet. See CalendarInvitePayload in integrations.ts.
-              idempotencyKey: holdId,
-              attendeeEmail: attendee.email,
-              eventName: eventId,
-              eventDate: Date.now(),
-              durationMinutes: 120,
-              locationOrUrl: 'TBD',
-              bookingId: booking.id,
-            });
-          } catch {
-            // Stub errors are swallowed — real implementation would log to a dead-letter queue
-            console.error('[INTEGRATIONS] Stub dispatch failed — would DLQ in production');
-            Sentry.captureMessage('[INTEGRATIONS] Stub dispatch failed — would DLQ in production', {
+            const [eventRow] = await db
+              .select({ name: events.name, date: events.date })
+              .from(events)
+              .where(eq(events.id, eventId));
+            if (eventRow) {
+              realEventName = eventRow.name;
+              realEventDate = eventRow.date instanceof Date
+                ? eventRow.date.getTime()
+                : Number(eventRow.date);
+            }
+          } catch (eventLookupErr: unknown) {
+            console.error('Failed to fetch event metadata for confirmed booking:', eventLookupErr);
+            Sentry.captureMessage('Failed to fetch event metadata for confirmed booking', {
               level: 'warning',
               extra: {
                 holdId,
+                eventId,
                 bookingId: booking.id,
+                error: eventLookupErr instanceof Error ? eventLookupErr.message : String(eventLookupErr),
               },
             });
+          }
+
+          // Fire-and-forget integration stubs.
+          // Errors are swallowed — a failed email must not cause a non-200 response,
+          // which would trigger Stripe to retry the webhook and double-book.
+          // Skipped entirely when event metadata is unavailable (avoids fake data).
+          if (realEventName !== null && realEventDate !== null) {
+            try {
+              await dispatchEmailConfirmation({
+                idempotencyKey: holdId,
+                to: attendee.email,
+                attendeeName: attendee.name,
+                eventName: realEventName,
+                eventDate: realEventDate,
+                seatCount,
+                bookingId: booking.id,
+                totalPaidPence: paymentIntent.amount_received,
+              });
+              await dispatchCalendarInvite({ // organizerEmail intentionally omitted — no organiser-email lookup exists yet. See CalendarInvitePayload in integrations.ts.
+                idempotencyKey: holdId,
+                attendeeEmail: attendee.email,
+                eventName: realEventName,
+                eventDate: realEventDate,
+                durationMinutes: 120,
+                locationOrUrl: 'TBD',
+                bookingId: booking.id,
+              });
+            } catch {
+              // Stub errors are swallowed — real implementation would log to a dead-letter queue
+              console.error('[INTEGRATIONS] Stub dispatch failed — would DLQ in production');
+              Sentry.captureMessage('[INTEGRATIONS] Stub dispatch failed — would DLQ in production', {
+                level: 'warning',
+                extra: {
+                  holdId,
+                  bookingId: booking.id,
+                },
+              });
+            }
+          }
+
+          // Generate PDF ticket and upload to R2.
+          // Failure is fully isolated — a PDF/R2 error must not turn a successfully
+          // confirmed booking into a non-200 response. If generation fails here the
+          // ticket is generated lazily on first download via getTicket.
+          // Skipped when event metadata is unavailable (same guard as integrations above).
+          if (realEventName !== null && realEventDate !== null) {
+            try {
+              const pdfBytes = await generateTicketPdf({
+                attendeeName: attendee.name,
+                eventName: realEventName,
+                eventDate: realEventDate,
+                seatCount,
+                bookingId: booking.id,
+              });
+              await env.EVENT_TICKETS.put(
+                `tickets/${booking.id}.pdf`,
+                pdfBytes,
+                { httpMetadata: { contentType: 'application/pdf' } },
+              );
+            } catch (ticketErr: unknown) {
+              console.error('[TICKET] PDF generation or R2 upload failed:', ticketErr);
+              Sentry.captureMessage('[TICKET] PDF generation or R2 upload failed at webhook time', {
+                level: 'warning',
+                extra: {
+                  holdId,
+                  bookingId: booking.id,
+                  error: ticketErr instanceof Error ? ticketErr.message : String(ticketErr),
+                },
+              });
+              // Not re-thrown — ticket can be generated lazily on first getTicket call.
+            }
           }
 
           return new Response('', { status: 200 });

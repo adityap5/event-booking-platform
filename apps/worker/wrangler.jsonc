@@ -1,69 +1,88 @@
 {
-  // https://developers.cloudflare.com/workers/wrangler/configuration/
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "event-booking-worker",
-  "main": "src/index.ts",
- "compatibility_date": "2026-07-29",
-  "compatibility_flags": ["nodejs_als"],
-
-  // ── Public URL vars (non-secret; used to build absolute URLs in routers) ──
-  // Update these if either app's deployed URL ever changes.
-  "vars": {
-    "WORKER_URL": "https://event-booking-worker.aditya29.workers.dev",
-    "WEB_APP_URL": "https://event-booking-web.aditya29.workers.dev"
-  },
-  "observability": {
-  "enabled": true,
-  "logs": {
-    "enabled": true,
-    "invocation_logs": true,
-    "persist": true,
-    "destinations": ["axiom-logs"]
-  }
-},
-"logpush": true,
-  "triggers": {
-    "crons": ["*/5 * * * *"]
-  },
-
-  // ── Storage bindings ──────────────────────────────────────────────
-
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "event-booking-db",
-      "database_id": "05383818-d198-4e5c-a161-cde5e7dca296"
-    }
-  ],
-
-  "kv_namespaces": [
-    {
-      "binding": "EVENT_CACHE",
-      "id": "9d9eb3a5c47c4ebcaf9e473674e7e25b"
-    }
-  ],
-
-  "r2_buckets": [
-    {
-      "binding": "EVENT_COVERS",
-      "bucket_name": "event-covers"
-    }
-  ],
-
-  // ── Durable Objects ───────────────────────────────────────────────
-
-  "durable_objects": {
-    "bindings": [
-    { "name": "SEAT_LEDGER", "class_name": "SeatLedger" },
-    { "name": "RATE_LIMITER", "class_name": "RateLimiter" }
-  ]
-  },
-
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["SeatLedger"]
-    },
-    { "tag": "v2", "new_sqlite_classes": ["RateLimiter"] }
-  ]
+	// https://developers.cloudflare.com/workers/wrangler/configuration/
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "event-booking-worker",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-07-29",
+	"compatibility_flags": [
+		"nodejs_als"
+	],
+	// ── Public URL vars (non-secret; used to build absolute URLs in routers) ──
+	// Update these if either app's deployed URL ever changes.
+	"vars": {
+		"WORKER_URL": "https://event-booking-worker.aditya29.workers.dev",
+		"WEB_APP_URL": "https://event-booking-web.aditya29.workers.dev"
+	},
+	"observability": {
+		"enabled": true,
+		"logs": {
+			"enabled": true,
+			"invocation_logs": true,
+			"persist": true,
+			"destinations": [
+				"axiom-logs"
+			]
+		}
+	},
+	"logpush": true,
+	"triggers": {
+		"crons": [
+			"*/5 * * * *"
+		]
+	},
+	// ── Storage bindings ──────────────────────────────────────────────
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "event-booking-db",
+			"database_id": "05383818-d198-4e5c-a161-cde5e7dca296"
+		}
+	],
+	"kv_namespaces": [
+		{
+			"binding": "EVENT_CACHE",
+			"id": "9d9eb3a5c47c4ebcaf9e473674e7e25b"
+		}
+	],
+	"r2_buckets": [
+		{
+			"binding": "EVENT_COVERS",
+			"bucket_name": "event-covers"
+		},
+		{
+			// Private bucket for generated PDF tickets.
+			// Provision with: wrangler r2 bucket create event-tickets
+			// Never serve via a public /images/ route — access is gated by the
+			// authenticated getTicket tRPC procedure.
+			"binding": "EVENT_TICKETS",
+			"bucket_name": "event-tickets"
+		}
+	],
+	// ── Durable Objects ───────────────────────────────────────────────
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "SEAT_LEDGER",
+				"class_name": "SeatLedger"
+			},
+			{
+				"name": "RATE_LIMITER",
+				"class_name": "RateLimiter"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"SeatLedger"
+			]
+		},
+		{
+			"tag": "v2",
+			"new_sqlite_classes": [
+				"RateLimiter"
+			]
+		}
+	]
 }
