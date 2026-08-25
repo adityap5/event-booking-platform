@@ -14,6 +14,10 @@
 // Email confirmation
 // ---------------------------------------------------------------------------
 
+// SECURITY NOTE: When a real email provider is eventually wired in (replacing the stub below),
+// unescaped newlines (\r\n) in `to` or `attendeeName` become header-injection vectors if interpolated
+// directly into raw email headers (classic SMTP/email header injection). Ensure input sanitization/escaping
+// or structured SDK payload parameters are used when implementing the real provider dispatch.
 export interface EmailConfirmationPayload {
   idempotencyKey: string;   // bookingId — prevents duplicate sends on retry
   to: string;               // attendee email address

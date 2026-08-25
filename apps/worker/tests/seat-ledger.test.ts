@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { env, runInDurableObject, runDurableObjectAlarm } from 'cloudflare:test';
 import type { Env } from '../src/index.js';
+import * as schema from '@event-booking/shared';
 import { setupTestDb, createTestCaller } from './test-helpers.js';
 import type { SeatLedger } from '../src/seat-ledger.js';
 
@@ -218,6 +219,48 @@ describe('SeatLedger DO & reserveSeat regression tests', () => {
       const res = await caller.reserveSeat({ eventId, seatCount: 1 });
       expect(res.reservationId).toBeDefined();
     });
+
+    it('rejects reservation attempts for past events with PRECONDITION_FAILED and creates no DO hold', async () => {
+      const pastEventId = 'test-past-event-id';
+
+      // Seed past event (date 2 hours ago)
+      await db.insert(schema.events).values({
+        id: pastEventId,
+        organisationId: 'test-org-1',
+        name: 'Past Event',
+        date: new Date(Date.now() - 2 * 60 * 60 * 1000),
+        totalSeats: 20,
+        pricePerSeat: 1000,
+      });
+
+      const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(pastEventId));
+
+      const caller = createTestCaller({
+        env: workerEnv,
+        db,
+        userId: 'user-past-reservation-attempt',
+      });
+
+      await expect(
+        caller.reserveSeat({ eventId: pastEventId, seatCount: 1 })
+      ).rejects.toThrowError('Event has already started.');
+
+      // Verify no DO reservation was created
+      const confirmedHolds = await stub.listConfirmedHolds(0);
+      expect(confirmedHolds).toHaveLength(0);
+    });
+
+    it('rejects reservation attempts for non-existent events with NOT_FOUND', async () => {
+      const caller = createTestCaller({
+        env: workerEnv,
+        db,
+        userId: 'user-nonexistent-event',
+      });
+
+      await expect(
+        caller.reserveSeat({ eventId: 'completely-nonexistent-event-id', seatCount: 1 })
+      ).rejects.toThrowError('Event not found');
+    });
   });
 
   describe('Task 3: True Concurrency Seat Race', () => {
@@ -309,6 +352,161 @@ describe('SeatLedger DO & reserveSeat regression tests', () => {
           return instance.redeemTicket(ticket, eventId);
         })
       ).rejects.toThrowError('TICKET_NOT_FOUND');
+    });
+  });
+
+  describe('A1: releaseHold mutation', () => {
+    const eventId = 'test-release-hold-event';
+
+    beforeEach(async () => {
+      // Seed event in D1
+      await db.insert(schema.events).values({
+        id: eventId,
+        organisationId: 'test-org-1',
+        name: 'Release Hold Test Event',
+        date: new Date(Date.now() + 86400000),
+        totalSeats: 10,
+        pricePerSeat: 1000,
+      });
+
+      const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+      await stub.initialize(10);
+    });
+
+    it('allows owner to release pending hold and immediately re-reserve without hitting pending-hold cap', async () => {
+      const caller = createTestCaller({
+        env: workerEnv,
+        db,
+        userId: 'user-release-1',
+      });
+
+      // 1. Reserve 2 seats
+      const hold = await caller.reserveSeat({ eventId, seatCount: 2 });
+      expect(hold.reservationId).toBeDefined();
+
+      // 2. Second reserveSeat call is blocked by pending-hold cap
+      await expect(
+        caller.reserveSeat({ eventId, seatCount: 3 })
+      ).rejects.toThrowError('TOO_MANY_PENDING_HOLDS');
+
+      // 3. Voluntarily release the pending hold
+      const releaseRes = await caller.releaseHold({
+        eventId,
+        holdId: hold.reservationId,
+      });
+      expect(releaseRes).toEqual({ success: true });
+
+      // 4. User can immediately re-reserve with new seat count
+      const newHold = await caller.reserveSeat({ eventId, seatCount: 4 });
+      expect(newHold.reservationId).toBeDefined();
+    });
+
+    it('rejects attempt to release another user hold with FORBIDDEN', async () => {
+      const callerA = createTestCaller({
+        env: workerEnv,
+        db,
+        userId: 'user-A-owner',
+      });
+
+      const callerB = createTestCaller({
+        env: workerEnv,
+        db,
+        userId: 'user-B-attacker',
+      });
+
+      const holdA = await callerA.reserveSeat({ eventId, seatCount: 1 });
+
+      await expect(
+        callerB.releaseHold({
+          eventId,
+          holdId: holdA.reservationId,
+        })
+      ).rejects.toThrowError('This hold does not belong to you');
+    });
+
+    it('rejects attempt to release an already confirmed hold with CONFLICT', async () => {
+      const caller = createTestCaller({
+        env: workerEnv,
+        db,
+        userId: 'user-confirmed-release',
+      });
+
+      const hold = await caller.reserveSeat({ eventId, seatCount: 1 });
+      const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+      await stub.confirmSeat(hold.reservationId);
+
+      await expect(
+        caller.releaseHold({
+          eventId,
+          holdId: hold.reservationId,
+        })
+      ).rejects.toThrowError('Cannot release a confirmed booking');
+    });
+
+    it('rejects non-matching eventId or non-existent hold with NOT_FOUND', async () => {
+      const caller = createTestCaller({
+        env: workerEnv,
+        db,
+        userId: 'user-not-found',
+      });
+
+      // Non-existent hold
+      await expect(
+        caller.releaseHold({
+          eventId,
+          holdId: crypto.randomUUID(),
+        })
+      ).rejects.toThrowError('Hold not found');
+
+      // Non-existent event
+      await expect(
+        caller.releaseHold({
+          eventId: 'non-existent-event-id',
+          holdId: crypto.randomUUID(),
+        })
+      ).rejects.toThrowError('Event not found');
+    });
+  });
+
+  describe('A4: listConfirmedHolds() time-window filtering', () => {
+    it('excludes confirmed holds older than the cutoff window while returning active confirmed holds', async () => {
+      const eventId = 'test-list-confirmed-windowing';
+      const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+      await stub.initialize(20);
+
+      const oldHoldId = 'old-confirmed-hold';
+      const recentHoldId = 'recent-confirmed-hold';
+
+      // 8 days ago (beyond 7-day cutoff)
+      const eightDaysAgo = Date.now() - 8 * 24 * 60 * 60 * 1000;
+      // 1 day ago (within 7-day cutoff)
+      const oneDayAgo = Date.now() - 1 * 24 * 60 * 60 * 1000;
+
+      await runInDurableObject(stub, (instance: SeatLedger) => {
+        (instance as any).ctx.storage.sql.exec(
+          "INSERT INTO reservations (id, user_id, seat_count, expires_at, status) VALUES (?, ?, ?, ?, 'confirmed'), (?, ?, ?, ?, 'confirmed')",
+          oldHoldId,
+          'user-old',
+          1,
+          eightDaysAgo,
+          recentHoldId,
+          'user-recent',
+          2,
+          oneDayAgo
+        );
+      });
+
+      // Default call filters to last 7 days
+      const results = await stub.listConfirmedHolds();
+
+      expect(results).toHaveLength(1);
+      expect(results[0]?.id).toBe(recentHoldId);
+      expect(results[0]?.userId).toBe('user-recent');
+      expect(results[0]?.seatCount).toBe(2);
+
+      // Explicitly passing an older timestamp returns both
+      const allResults = await stub.listConfirmedHolds(Date.now() - 10 * 24 * 60 * 60 * 1000);
+      expect(allResults).toHaveLength(2);
     });
   });
 });

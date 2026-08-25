@@ -165,9 +165,16 @@ class SeatLedgerBase extends DurableObject<Env> {
     };
   }
 
-  async listConfirmedHolds(): Promise<{ id: string; userId: string; seatCount: number; expiresAt: number }[]> {
+  async listConfirmedHolds(since?: number): Promise<{ id: string; userId: string; seatCount: number; expiresAt: number }[]> {
+    // Default cutoff to 7 days (168 hours) ago.
+    // Derived from the 15-minute hold lifecycle: orphaned holds are confirmed and become eligible for reconciliation
+    // within 15 minutes of reservation, swept every 5 minutes by the reconciliation cron (2,016 sweeps in 7 days).
+    // Bounding to 7 days prevents unbounded memory/CPU growth on long-running events while ensuring zero unreconciled
+    // holds are missed.
+    const cutoff = since ?? (Date.now() - 7 * 24 * 60 * 60 * 1000);
     const rows = this.ctx.storage.sql.exec(
-      "SELECT id, user_id, seat_count, expires_at FROM reservations WHERE status = 'confirmed'"
+      "SELECT id, user_id, seat_count, expires_at FROM reservations WHERE status = 'confirmed' AND expires_at > ?",
+      cutoff
     ).toArray();
     return rows.map((row) => ({
       id: row.id as string,

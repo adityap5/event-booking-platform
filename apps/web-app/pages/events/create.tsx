@@ -139,7 +139,16 @@ export default function CreateEventPage() {
         </Head>
 
         <header className={styles.header}>
-          <OrganizationSwitcher hidePersonal={true} />
+          <OrganizationSwitcher
+            hidePersonal={true}
+            appearance={{
+              elements: {
+                organizationSwitcherPopoverActionButton__createOrganization: {
+                  display: 'none',
+                },
+              },
+            }}
+          />
           <UserButton />
         </header>
 

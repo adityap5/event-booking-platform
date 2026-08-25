@@ -1,5 +1,5 @@
 import { fetchRequestHandler } from '@trpc/server/adapters/fetch';
-import { createContext } from '@event-booking/trpc';
+import { createContext, isExpectedAppErrorCode } from '@event-booking/trpc';
 import { appRouter } from './router.js';
 import { drizzle } from 'drizzle-orm/d1';
 import * as schema from '@event-booking/shared';
@@ -145,16 +145,7 @@ export default Sentry.withSentry(
             env,
           }),
         onError({ error, type, path }) {
-          const isExpectedAppError =
-            error.code === 'UNAUTHORIZED' ||
-            error.code === 'FORBIDDEN' ||
-            error.code === 'NOT_FOUND' ||
-            error.code === 'CONFLICT' ||
-            error.code === 'PRECONDITION_FAILED' ||
-            error.code === 'TOO_MANY_REQUESTS' ||
-            error.code === 'BAD_REQUEST';
-
-          if (!isExpectedAppError) {
+          if (!isExpectedAppErrorCode(error.code)) {
             Sentry.captureException(error.cause ?? error, {
               tags: { path, type },
               extra: { code: error.code },

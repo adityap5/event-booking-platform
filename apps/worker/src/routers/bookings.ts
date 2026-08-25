@@ -66,17 +66,27 @@ export const bookingsRouter = {
         });
       }
 
+      const [event] = await ctx.db
+        .select({ totalSeats: events.totalSeats, date: events.date })
+        .from(events)
+        .where(eq(events.id, input.eventId));
+
+      if (!event) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Event not found' });
+      }
+
+      if (event.date.getTime() <= Date.now()) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'Event has already started.',
+        });
+      }
+
       const id = ctx.env.SEAT_LEDGER.idFromName(input.eventId);
       const stub = ctx.env.SEAT_LEDGER.get(id);
 
       const available = await stub.getAvailableSeats();
       if (available === null) {
-        const [event] = await ctx.db.select({ totalSeats: events.totalSeats })
-          .from(events)
-          .where(eq(events.id, input.eventId));
-          
-        if (!event) throw new TRPCError({ code: 'NOT_FOUND', message: 'Event not found' });
-        
         await stub.initialize(event.totalSeats);
       }
 
@@ -84,23 +94,65 @@ export const bookingsRouter = {
         const result = await stub.reserveSeat(ctx.userId, input.seatCount);
         return result;
       } catch (err: unknown) {
-  const message = err instanceof Error ? err.message : '';
+        const message = err instanceof Error ? err.message : '';
 
-  if (message === 'TOO_MANY_PENDING_HOLDS') {
-    throw new TRPCError({
-      code: 'CONFLICT',
-      message: 'TOO_MANY_PENDING_HOLDS',
-    });
-  }
+        if (message === 'TOO_MANY_PENDING_HOLDS') {
+          throw new TRPCError({
+            code: 'CONFLICT',
+            message: 'TOO_MANY_PENDING_HOLDS',
+          });
+        }
 
-  console.error('[reserveSeat] Unexpected error', err);
+        console.error('[reserveSeat] Unexpected error', err);
 
-  throw new TRPCError({
-    code: 'INTERNAL_SERVER_ERROR',
-    message: 'Unable to reserve seats',
-    cause: err,
-  });
-}
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Unable to reserve seats',
+          cause: err,
+        });
+      }
+    }),
+
+  releaseHold: workerProcedure
+    .input(
+      z.object({
+        eventId: z.string(),
+        holdId: z.string().uuid(),
+      })
+    )
+    .mutation(async ({ input, ctx }) => {
+      const [event] = await ctx.db
+        .select({ id: events.id })
+        .from(events)
+        .where(eq(events.id, input.eventId));
+
+      if (!event) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Event not found' });
+      }
+
+      const id = ctx.env.SEAT_LEDGER.idFromName(input.eventId);
+      const stub = ctx.env.SEAT_LEDGER.get(id);
+
+      const hold = await stub.getHold(input.holdId);
+      if (!hold) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Hold not found' });
+      }
+
+      // Ownership check: must match caller userId
+      if (hold.userId !== ctx.userId) {
+        throw new TRPCError({ code: 'FORBIDDEN', message: 'This hold does not belong to you' });
+      }
+
+      // If hold is confirmed, reject clearly (do not silently no-op)
+      if (hold.status === 'confirmed') {
+        throw new TRPCError({ code: 'CONFLICT', message: 'Cannot release a confirmed booking' });
+      }
+
+      if (hold.status === 'pending') {
+        await stub.releaseSeat(input.holdId);
+      }
+
+      return { success: true };
     }),
 
   ensureAttendee: workerProcedure.mutation(async ({ ctx }) => {

@@ -156,6 +156,25 @@ describe('Item 1: Defensive role check on createEvent', () => {
     const orgBEvents = await callerOrgB.listOrgEvents();
     expect(orgBEvents.some((e) => e.id === createdByB!.id)).toBe(true);
   });
+
+  it('A2: defensive FK check throws clear PRECONDITION_FAILED TRPCError when organisation is not in D1', async () => {
+    const unregisteredOrgCaller = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-unregistered-org',
+      orgId: 'unregistered-clerk-org-id',
+      role: 'organiser',
+    });
+
+    await expect(
+      unregisteredOrgCaller.createEvent({
+        name: 'Loophole Org Event Attempt',
+        date: Date.now() + 86400000,
+        totalSeats: 50,
+        pricePerSeat: 1000,
+      })
+    ).rejects.toThrowError('Organisation not recognized. Please complete organiser onboarding first.');
+  });
 });
 
 describe('Event cover finalization with temporary R2 upload key', () => {

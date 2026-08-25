@@ -85,7 +85,16 @@ export default function DashboardPage() {
           marginBottom: '2rem',
         }}
       >
-        <OrganizationSwitcher hidePersonal={true} />
+        <OrganizationSwitcher
+          hidePersonal={true}
+          appearance={{
+            elements: {
+              organizationSwitcherPopoverActionButton__createOrganization: {
+                display: 'none',
+              },
+            },
+          }}
+        />
         <UserButton />
       </header>
 

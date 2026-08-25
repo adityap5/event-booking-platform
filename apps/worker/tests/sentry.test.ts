@@ -122,6 +122,16 @@ describe('Sentry Error Monitoring Integration', () => {
 
     const expectedError = new Error('DO SQLite internal corruption');
 
+    // Seed event in D1
+    await db.insert(schema.events).values({
+      id: 'event-sentry-err-1',
+      organisationId: 'test-org-1',
+      name: 'Sentry Error Event',
+      date: new Date(Date.now() + 86400000),
+      totalSeats: 10,
+      pricePerSeat: 1000,
+    });
+
     const testEnv: Env = {
       ...workerEnv,
       SEAT_LEDGER: createMockSeatLedgerNamespace(async () => {
@@ -140,10 +150,10 @@ describe('Sentry Error Monitoring Integration', () => {
 
     const res = await worker.fetch(req, testEnv);
 
-    // Verify response is HTTP 500 with unchanged tRPC error payload
+    // Verify response is HTTP 500 with sanitized generic error message
     expect(res.status).toBe(500);
     const body = await res.json() as { error: { message: string; data: { code: string } } };
-    expect(body.error.message).toBe('Unable to reserve seats');
+    expect(body.error.message).toBe('Internal server error');
     expect(body.error.data.code).toBe('INTERNAL_SERVER_ERROR');
 
     // Verify fetchRequestHandler.onError caught INTERNAL_SERVER_ERROR and captured the exact underlying Error instance
@@ -183,10 +193,10 @@ describe('Sentry Error Monitoring Integration', () => {
 
       const res = await worker.fetch(req, workerEnv);
 
-      // Verify client response is HTTP 500 with unchanged error payload
+      // Verify client response is HTTP 500 with sanitized generic error message
       expect(res.status).toBe(500);
       const body = await res.json() as { error: { message: string; data: { code: string } } };
-      expect(body.error.message).toBe('Failed to create attendee profile');
+      expect(body.error.message).toBe('Internal server error');
       expect(body.error.data.code).toBe('INTERNAL_SERVER_ERROR');
 
       // Verify Sentry.captureException was called with the real underlying DB error (not the TRPCError wrapper)

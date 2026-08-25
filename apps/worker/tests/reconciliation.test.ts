@@ -830,6 +830,138 @@ describe('Day 7: Audit Log & Reconciliation Tests', () => {
       const summary = await runReconciliation(workerEnv);
       expect(summary.orphansDetected).toBe(0);
     });
+
+    it('A3: excludes events older than 7-day cutoff from reconciliation query', async () => {
+      const oldEventId = 'reconcile-event-too-old';
+      const recentEventId = 'reconcile-event-in-window';
+
+      // Old event 8 days ago
+      await db.insert(schema.events).values({
+        id: oldEventId,
+        organisationId: 'test-org-1',
+        name: 'Old Event (8 days ago)',
+        date: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000),
+        totalSeats: 10,
+        pricePerSeat: 5000,
+      });
+
+      // Recent event in future
+      await db.insert(schema.events).values({
+        id: recentEventId,
+        organisationId: 'test-org-1',
+        name: 'Recent Event (in window)',
+        date: new Date(Date.now() + 86400000),
+        totalSeats: 10,
+        pricePerSeat: 5000,
+      });
+
+      const stubOld = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(oldEventId));
+      await stubOld.initialize(10);
+      const stubRecent = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(recentEventId));
+      await stubRecent.initialize(10);
+
+      // Create an orphan on the old event and an orphan on the recent event
+      await runInDurableObject(stubOld, (instance: SeatLedger) => {
+        (instance as any).ctx.storage.sql.exec(
+          "INSERT INTO reservations (id, user_id, seat_count, expires_at, status) VALUES (?, ?, ?, ?, 'confirmed')",
+          'orphan-old-event',
+          'user-old',
+          1,
+          Date.now() - 30000
+        );
+      });
+
+      await runInDurableObject(stubRecent, (instance: SeatLedger) => {
+        (instance as any).ctx.storage.sql.exec(
+          "INSERT INTO reservations (id, user_id, seat_count, expires_at, status) VALUES (?, ?, ?, ?, 'confirmed')",
+          'orphan-recent-event',
+          'user-recent',
+          1,
+          Date.now() - 30000
+        );
+      });
+
+      const summary = await runReconciliation(workerEnv);
+
+      // Only recentEventId is checked (oldEventId is filtered out at D1 query level)
+      expect(summary.checkedEvents).toBe(1);
+      expect(summary.orphansDetected).toBe(1);
+
+      // Only recent orphan's audit_log was written
+      const oldAudit = await db
+        .select()
+        .from(schema.auditLog)
+        .where(eq(schema.auditLog.holdId, 'orphan-old-event'));
+      expect(oldAudit).toHaveLength(0);
+
+      const recentAudit = await db
+        .select()
+        .from(schema.auditLog)
+        .where(eq(schema.auditLog.holdId, 'orphan-recent-event'));
+      expect(recentAudit).toHaveLength(1);
+    });
+
+    it('A3: batch fault isolation: failure in one event DO does not prevent remaining events from being reconciled', async () => {
+      const eventFaulty = 'reconcile-event-faulty';
+      const eventHealthy = 'reconcile-event-healthy-batch';
+
+      await db.insert(schema.events).values({
+        id: eventFaulty,
+        organisationId: 'test-org-1',
+        name: 'Faulty DO Event',
+        date: new Date(Date.now() + 86400000),
+        totalSeats: 10,
+        pricePerSeat: 5000,
+      });
+
+      await db.insert(schema.events).values({
+        id: eventHealthy,
+        organisationId: 'test-org-1',
+        name: 'Healthy DO Event',
+        date: new Date(Date.now() + 86400000),
+        totalSeats: 10,
+        pricePerSeat: 5000,
+      });
+
+      const stubHealthy = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventHealthy));
+      await stubHealthy.initialize(10);
+      await runInDurableObject(stubHealthy, (instance: SeatLedger) => {
+        (instance as any).ctx.storage.sql.exec(
+          "INSERT INTO reservations (id, user_id, seat_count, expires_at, status) VALUES (?, ?, ?, ?, 'confirmed')",
+          'orphan-healthy-batch',
+          'user-healthy',
+          2,
+          Date.now() - 30000
+        );
+      });
+
+      // Mock SEAT_LEDGER.get to throw for eventFaulty
+      const originalGet = workerEnv.SEAT_LEDGER.get.bind(workerEnv.SEAT_LEDGER);
+      const getSpy = vi.spyOn(workerEnv.SEAT_LEDGER, 'get').mockImplementation((id) => {
+        if (id.toString() === workerEnv.SEAT_LEDGER.idFromName(eventFaulty).toString()) {
+          return {
+            listConfirmedHolds: async () => {
+              throw new Error('Durable Object unreachable for faulty event');
+            },
+          } as any;
+        }
+        return originalGet(id);
+      });
+
+      const summary = await runReconciliation(workerEnv);
+
+      // Faulty event fails gracefully, healthy event orphan is detected
+      expect(summary.checkedEvents).toBe(2);
+      expect(summary.orphansDetected).toBe(1);
+
+      const auditRows = await db
+        .select()
+        .from(schema.auditLog)
+        .where(eq(schema.auditLog.holdId, 'orphan-healthy-batch'));
+      expect(auditRows).toHaveLength(1);
+
+      getSpy.mockRestore();
+    });
   });
 
   describe('3. Scheduled handler wiring in index.ts', () => {

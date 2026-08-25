@@ -244,16 +244,35 @@ export const eventsRouter = {
         }
       }
 
-      const [created] = await ctx.db.insert(schema.events).values({
-        id: eventId,
-        organisationId: orgId, // always from verified JWT, never from input
-        name: input.name,
-        description: input.description ?? null,
-        date: new Date(input.date), // mode:'timestamp' — Drizzle expects a Date object
-        totalSeats: input.totalSeats,
-        pricePerSeat: input.pricePerSeat,
-        coverImageUrl,
-      }).returning({ id: schema.events.id, name: schema.events.name });
+      let created;
+      try {
+        [created] = await ctx.db.insert(schema.events).values({
+          id: eventId,
+          organisationId: orgId, // always from verified JWT, never from input
+          name: input.name,
+          description: input.description ?? null,
+          date: new Date(input.date), // mode:'timestamp' — Drizzle expects a Date object
+          totalSeats: input.totalSeats,
+          pricePerSeat: input.pricePerSeat,
+          coverImageUrl,
+        }).returning({ id: schema.events.id, name: schema.events.name });
+      } catch (err: unknown) {
+        const errorText = [
+          err instanceof Error ? err.message : '',
+          err instanceof Error && err.cause instanceof Error ? err.cause.message : '',
+          err instanceof Error && err.cause ? String(err.cause) : '',
+          String(err),
+        ].join(' ');
+        // Specifically detect D1 foreign-key constraint violation on organisations(id)
+        if (/FOREIGN KEY constraint failed/i.test(errorText)) {
+          throw new TRPCError({
+            code: 'PRECONDITION_FAILED',
+            message: 'Organisation not recognized. Please complete organiser onboarding first.',
+            cause: err,
+          });
+        }
+        throw err;
+      }
 
       // Invalidate public event list cache after successful D1 insert
       await safeInvalidateCache(ctx.env, getPublicEventsCacheKey());

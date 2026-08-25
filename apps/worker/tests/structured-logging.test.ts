@@ -58,6 +58,14 @@ describe('Day 6 Structured Logging & Observability Groundwork', () => {
       // Exhaust 10 allowed requests across distinct event DO instances
       for (let i = 0; i < 10; i++) {
         const eventId = `evt-reserve-rate-${i}`;
+        await db.insert(schema.events).values({
+          id: eventId,
+          organisationId: 'test-org-1',
+          name: `Rate Limit Event ${i}`,
+          date: new Date(Date.now() + 86400000),
+          totalSeats: 100,
+          pricePerSeat: 1000,
+        });
         const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
         stub.initialize(100);
         await caller.reserveSeat({ eventId, seatCount: 1 });

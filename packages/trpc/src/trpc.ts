@@ -2,14 +2,30 @@ import { initTRPC, TRPCError } from '@trpc/server';
 import type { Context } from './context.js';
 import { authorizeOrganiserAccess } from '@event-booking/permissions';
 
+export function isExpectedAppErrorCode(code: string): boolean {
+  return (
+    code === 'UNAUTHORIZED' ||
+    code === 'FORBIDDEN' ||
+    code === 'NOT_FOUND' ||
+    code === 'CONFLICT' ||
+    code === 'PRECONDITION_FAILED' ||
+    code === 'TOO_MANY_REQUESTS' ||
+    code === 'BAD_REQUEST'
+  );
+}
+
 const t = initTRPC.context<Context>().create({
   errorFormatter({ shape }) {
+    const isExpected = isExpectedAppErrorCode(shape.data.code);
+    const isDev = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.NODE_ENV === 'development';
     return {
       ...shape,
+      // Unexpected / uncaught runtime errors (e.g. INTERNAL_SERVER_ERROR) must never leak raw message text to clients
+      message: isExpected ? shape.message : 'Internal server error',
       data: {
         ...shape.data,
-        // Never expose stack traces or internal error messages in production
-        stack: process.env.NODE_ENV === 'development' ? shape.data.stack : undefined,
+        // Never expose stack traces in production
+        stack: isDev ? shape.data.stack : undefined,
       },
     };
   },

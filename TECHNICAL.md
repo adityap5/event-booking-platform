@@ -620,3 +620,31 @@ In `routers/tickets.ts`, authorization (`isOwnAttendee` and organiser role verif
 `applyWorkerSecurityHeaders` (`cors.ts`) reconstructs `new Response(response.body, { status, statusText, headers: new Headers(response.headers) })` rather than mutating `response.headers` in place.
 - **Durable Object RPC immutability:** Responses returned across Durable Object RPC stubs (`stub.fetch(request)`) carry immutable header guards in the Cloudflare Workers runtime. In-place `.headers.set()` on a DO-generated response (such as a `400 "Missing ticket or eventId"`) throws `TypeError: Can't modify immutable headers`, which Sentry's outer handler would escalate into an unexpected 500 error.
 - Reconstructing the `Response` with cloned `Headers` ensures uniform, safe application of security headers across both locally constructed responses and DO stub responses. All call sites (including `index.ts`'s tRPC handler) capture the returned reconstructed `Response`.
+
+---
+
+## 21. Networkless JWT Verification
+
+Chose networkless JWT verification (via Clerk's JWKS public key, `CLERK_JWT_KEY`) over live JWKS fetching, trading automatic key-rotation awareness for lower per-request latency. This is acceptable at this scale, with the understanding that a future Clerk key rotation requires updating the Worker secret manually.
+
+Worth stating explicitly: this fails **closed**, not open. If the key is ever out of date after a rotation, every request fails signature verification and returns `401` loudly — it does not silently accept a token it can no longer properly verify. That's what makes the latency/rotation-awareness trade-off acceptable: the failure mode of being wrong is "loud outage," not "silent security hole."
+
+**Implementation Call Sites:**
+- `packages/trpc/src/context.ts` (`createContext`, lines 56–59): All incoming authenticated tRPC requests verify the Bearer token via `verifyToken(token, { jwtKey: clerkJwtKey, authorizedParties })` using the static `env.CLERK_JWT_KEY` secret. Failure throws a `TRPCError` with code `UNAUTHORIZED` (`401`).
+- `apps/worker/src/handlers/upload.ts` (`handleUpload`, lines 32–38): The event cover upload endpoint `/upload/event-cover` verifies the Bearer token via `verifyToken(token, { jwtKey: env.CLERK_JWT_KEY, authorizedParties: JWT_AUTHORIZED_PARTIES })`. Failure immediately returns `new Response('Unauthorized', { status: 401 })`.
+
+---
+
+## 22. ClerkProvider with `ssr: false` (Frontend Hydration Trade-off)
+
+`apps/web-app/pages/_app.tsx` (lines 4–7) dynamically imports `ClerkProvider` with `{ ssr: false }`. This was the fix for a Day 3 deployment-only error (`invariant expected app router to be mounted`) that only manifested once deployed, not in local dev.
+
+**Trade-off:** since `ClerkProvider` wraps the entire app (`<Component />` renders inside it, not beside it), nothing anywhere in the app can render server-side anymore — not just auth-gated pages. Every page, including fully public ones like event listings, now ships an empty shell on first response and hydrates client-side before anything becomes visible. This is directly observable in production: fetching the deployed frontend returns a page shell with no server-rendered content.
+
+**Cost:** a visible blank/loading gap on every page load (worse on slow connections), and any SEO/crawlability benefit of SSR is lost app-wide rather than just for the pages that actually need Clerk's client. This wasn't scoped narrowly at the time because the immediate deployment blocker took priority — worth revisiting whether only the auth-dependent subtree needs the dynamic import, rather than the whole provider, so public pages could keep SSR.
+
+---
+
+## 23. Lazy Attendee Creation
+
+Attendee rows are created lazily, on first use (`ensureAttendee` in `apps/worker/src/routers/bookings.ts`, lines 106–148), rather than eagerly at sign-up — mirroring the pattern used for organisation sync via the Clerk webhook, but implemented differently: rather than waiting for an async webhook to populate the row, `ensureAttendee` calls Clerk's API directly and synchronously at creation time (`clerk.users.getUser(ctx.userId)`) to get the real name/email immediately. The placeholder values (`''` email, `'Attendee'` name) are a degrade-gracefully fallback for if that live Clerk API call itself fails — not the primary path. A concurrent double-insert race (two simultaneous first-time calls) is handled by catching the resulting unique-constraint error and re-reading the now-existing row rather than failing the request.
