@@ -161,9 +161,9 @@ describe('getTicket procedure', () => {
     });
   });
 
-  // ── Status guard tests ─────────────────────────────────────────────────────
+  // ── Status guard & authorization ordering tests ───────────────────────────
 
-  it('pending booking → NOT_FOUND', async () => {
+  it('pending booking by own attendee → NOT_FOUND', async () => {
     const PENDING_BOOKING_ID = 'booking-pending-ticket-test';
     await db.insert(schema.bookings).values({
       id: PENDING_BOOKING_ID,
@@ -181,7 +181,7 @@ describe('getTicket procedure', () => {
     });
   });
 
-  it('cancelled booking → NOT_FOUND', async () => {
+  it('cancelled booking by own attendee → NOT_FOUND', async () => {
     const CANCELLED_BOOKING_ID = 'booking-cancelled-ticket-test';
     await db.insert(schema.bookings).values({
       id: CANCELLED_BOOKING_ID,
@@ -196,6 +196,52 @@ describe('getTicket procedure', () => {
     const caller = attendeeCaller();
     await expect(caller.getTicket({ bookingId: CANCELLED_BOOKING_ID })).rejects.toMatchObject({
       code: 'NOT_FOUND',
+    });
+  });
+
+  it('pending booking by unrelated user → FORBIDDEN (authorization before status guard)', async () => {
+    const PENDING_BOOKING_ID = 'booking-pending-unauth-test';
+    await db.insert(schema.bookings).values({
+      id: PENDING_BOOKING_ID,
+      eventId: EVENT_ID,
+      attendeeId: 'attendee-row-ticket-1',
+      status: 'pending',
+      seatCount: 1,
+      holdId: 'hold-pending-002',
+      stripePaymentIntentId: null,
+    });
+
+    const caller = unrelatedCaller();
+    await expect(caller.getTicket({ bookingId: PENDING_BOOKING_ID })).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+    });
+
+    const orgBCaller = organiserCaller(ORG_B);
+    await expect(orgBCaller.getTicket({ bookingId: PENDING_BOOKING_ID })).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+    });
+  });
+
+  it('cancelled booking by unrelated user → FORBIDDEN (authorization before status guard)', async () => {
+    const CANCELLED_BOOKING_ID = 'booking-cancelled-unauth-test';
+    await db.insert(schema.bookings).values({
+      id: CANCELLED_BOOKING_ID,
+      eventId: EVENT_ID,
+      attendeeId: 'attendee-row-ticket-1',
+      status: 'cancelled',
+      seatCount: 1,
+      holdId: 'hold-cancelled-002',
+      stripePaymentIntentId: null,
+    });
+
+    const caller = unrelatedCaller();
+    await expect(caller.getTicket({ bookingId: CANCELLED_BOOKING_ID })).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+    });
+
+    const orgBCaller = organiserCaller(ORG_B);
+    await expect(orgBCaller.getTicket({ bookingId: CANCELLED_BOOKING_ID })).rejects.toMatchObject({
+      code: 'FORBIDDEN',
     });
   });
 

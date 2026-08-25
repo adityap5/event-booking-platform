@@ -18,9 +18,15 @@ export function resolveAllowedOrigin(request: Request): string {
 }
 
 export function applyWorkerSecurityHeaders(response: Response): Response {
-  response.headers.set('X-Content-Type-Options', 'nosniff');
-  response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
-  response.headers.set('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
-  response.headers.set('Content-Security-Policy', "frame-ancestors 'none'");
-  return response;
+  const headers = new Headers(response.headers);
+  headers.set('X-Content-Type-Options', 'nosniff');
+  headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  headers.set('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+  headers.set('Content-Security-Policy', "frame-ancestors 'none'");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }
+

@@ -106,7 +106,7 @@ describe('Worker Security Response Headers Coverage', () => {
   });
 
   it('3. handleWebSocketUpgrade 400 error case returns all four security headers', async () => {
-    // Calling /ws without eventId query param triggers 400 "Missing eventId"
+    // Calling /ws without eventId query param triggers 400 "Missing eventId" (locally constructed)
     const res = await SELF.fetch('https://worker.dev/ws', {
       method: 'GET',
       headers: {
@@ -117,6 +117,29 @@ describe('Worker Security Response Headers Coverage', () => {
     expect(res.status).toBe(400);
     const text = await res.text();
     expect(text).toBe('Missing eventId');
+    expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
+    expect(res.headers.get('Referrer-Policy')).toBe('strict-origin-when-cross-origin');
+    expect(res.headers.get('Strict-Transport-Security')).toBe('max-age=15552000; includeSubDomains');
+    expect(res.headers.get('Content-Security-Policy')).toBe("frame-ancestors 'none'");
+  });
+
+  it('3b. handleWebSocketUpgrade with eventId present but ticket missing returns 400 from DO with security headers (not 500)', async () => {
+    // Calling /ws with eventId but no ticket reaches the DO stub and returns 400 "Missing ticket or eventId".
+    // Proves applyWorkerSecurityHeaders correctly handles responses with immutable headers from DO stubs without throwing TypeError / 500.
+    const eventId = 'ws-test-event-missing-ticket';
+    const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+    await stub.initialize(10);
+
+    const res = await SELF.fetch(`https://worker.dev/ws?eventId=${eventId}`, {
+      method: 'GET',
+      headers: {
+        'Upgrade': 'websocket',
+      },
+    });
+
+    expect(res.status).toBe(400);
+    const text = await res.text();
+    expect(text).toBe('Missing ticket or eventId');
     expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
     expect(res.headers.get('Referrer-Policy')).toBe('strict-origin-when-cross-origin');
     expect(res.headers.get('Strict-Transport-Security')).toBe('max-age=15552000; includeSubDomains');
@@ -148,6 +171,46 @@ describe('Worker Security Response Headers Coverage', () => {
     expect(res.headers.get('Referrer-Policy')).toBeNull();
     expect(res.headers.get('Strict-Transport-Security')).toBeNull();
     expect(res.headers.get('Content-Security-Policy')).toBeNull();
+  });
+
+  it('4b. handleWebSocketUpgrade with mismatched Origin header is rejected with 403 even with valid ticket', async () => {
+    const eventId = 'ws-test-event-origin-mismatch';
+    const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+    await stub.initialize(10);
+    const ticket = await stub.mintTicket('user-sec-origin', 'test-org-1', eventId);
+
+    const res = await SELF.fetch(`https://worker.dev/ws?eventId=${eventId}&ticket=${ticket}`, {
+      method: 'GET',
+      headers: {
+        'Upgrade': 'websocket',
+        'Origin': 'https://evil-attacker-website.com',
+      },
+    });
+
+    expect(res.status).toBe(403);
+    const text = await res.text();
+    expect(text).toBe('Invalid origin');
+    expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
+    expect(res.headers.get('Referrer-Policy')).toBe('strict-origin-when-cross-origin');
+    expect(res.headers.get('Strict-Transport-Security')).toBe('max-age=15552000; includeSubDomains');
+    expect(res.headers.get('Content-Security-Policy')).toBe("frame-ancestors 'none'");
+  });
+
+  it('4c. handleWebSocketUpgrade with valid Origin header from CORS_ALLOWED_ORIGINS succeeds with 101', async () => {
+    const eventId = 'ws-test-event-valid-origin';
+    const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+    await stub.initialize(10);
+    const ticket = await stub.mintTicket('user-sec-valid-origin', 'test-org-1', eventId);
+
+    const res = await SELF.fetch(`https://worker.dev/ws?eventId=${eventId}&ticket=${ticket}`, {
+      method: 'GET',
+      headers: {
+        'Upgrade': 'websocket',
+        'Origin': 'https://event-booking-web.aditya29.workers.dev',
+      },
+    });
+
+    expect(res.status).toBe(101);
   });
 
   it('5. checkBodySize 413 response returns security headers without altering status code or body', async () => {

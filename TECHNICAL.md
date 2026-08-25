@@ -574,3 +574,49 @@ The same swallow-and-continue pattern was already in use for the integrations bl
 **Why this class of bug is easy to miss**
 
 Audit inserts feel like "just logging" — low-stakes, safe to call anywhere. The failure mode is not the audit write itself crashing anything; it's the interaction between the crash propagation path and Stripe's retry behavior and the idempotency branch structure. Tracing it requires following the control flow through three separate layers (audit write → outer handler → Stripe retry → `confirmBookingFromPayment` → `already_confirmed` branch) and noticing that the `already_confirmed` branch returns without executing the integrations block. Any one of those layers in isolation looks correct.
+
+---
+
+## 19. `updateEvent` Field Scoping & Invariant Boundaries (Day 8, Phase 2)
+
+`updateEvent` (`routers/events.ts`) is deliberately restricted to updating only `name` and `description`. `totalSeats`, `pricePerSeat`, and `date` are intentionally excluded from mutation inputs.
+
+**1. `totalSeats` immutability:**
+- The SeatLedger Durable Object is the real-time authority on seat availability, initialized once with `totalSeats` and tracking `used` seats via `SUM(seat_count)` across active reservations.
+- If `totalSeats` could be decreased by an organiser after reservations have started, `totalSeats` could drop below the count of already-confirmed-or-pending holds. This would corrupt the availability math (`totalSeats - used` going negative or inconsistent with DO state).
+- Safely allowing `totalSeats` changes would require a complex distributed reconciliation protocol between D1 and the DO (e.g., rejecting reductions below active holds, updating internal DO limits, handling in-flight holds). Building that safely was judged out of scope; keeping `totalSeats` immutable preserves the DO correctness guarantee.
+
+**2. `pricePerSeat` and `date` immutability:**
+- Excluding `pricePerSeat` ensures that the amount calculated when creating a Stripe Checkout Session (`hold.seatCount × event.pricePerSeat`) remains strictly identical to what the webhook verifies upon payment confirmation.
+- **Architectural note on `amount_mismatch` reachability:** The Day 7 review concluded that the `amount_mismatch` branch in `confirmBookingFromPayment` is unreachable in practice under normal operation because no event-editing mutation exists to alter prices mid-flight. If `pricePerSeat` or `date` are ever exposed in an event-updating mutation in the future, this conclusion **must be explicitly revisited**: a price change occurring while a customer is completing an open Stripe Checkout session would make `amount_mismatch` reachable in practice.
+
+---
+
+## 20. Ticket Delivery Mechanism & Security Refinements (Day 8, Phase 2)
+
+### PDF Ticket Download via tRPC (`getTicket`)
+
+`getTicket` returns `{ pdf: base64string, filename }` from a tRPC query rather than streaming raw PDF bytes from a custom HTTP endpoint with `Content-Type: application/pdf` and `Content-Disposition`.
+
+**Trade-off evaluation & decision:**
+- **Auth reuse:** Returning via tRPC allows direct reuse of the existing `workerProcedure` / `Context` authentication chain, attendee ownership matching (`ctx.userId === attendee.userId`), and organiser role verification (`requireOrganiserRole` with org matching) without duplicating JWT verification and route matching logic in a custom HTTP fetch handler.
+- **Payload efficiency:** Generated ticket PDFs are small (~1-2KB). The ~33% base64 encoding overhead amounts to ~500 bytes, which is completely negligible over modern network connections.
+- **Access model:** Tickets are strictly gated to the booking's attendee or event organiser. Because shareable/bookmarkable unauthenticated URLs are not a requirement, tRPC base64 delivery is simpler, safer, and completely adequate.
+
+### `getTicket` Authorization Ordering
+
+In `routers/tickets.ts`, authorization (`isOwnAttendee` and organiser role verification) is executed **immediately after fetching the booking row and before the status guard** (`row.bookingStatus !== 'confirmed'`):
+- **Preventing Status Leaks:** If the status guard ran before authorization, unauthorized callers would receive `NOT_FOUND` ("No ticket available") for `pending` or `cancelled` bookings and `FORBIDDEN` for `confirmed` bookings. This would allow unauthorized users to probe arbitrary booking IDs to discover their status. Checking authorization first ensures that any unauthorized caller receives `FORBIDDEN` uniformly across all existing bookings.
+- **Non-existent booking IDs:** Non-existent booking IDs return `NOT_FOUND` ("Booking not found"). This is an accepted trade-off because booking IDs are unguessable UUIDs (`crypto.randomUUID()`), rendering ID-enumeration or existence-probing attacks impractical.
+
+### Cross-Site WebSocket Hijacking (CSWSH) Defense on `/ws`
+
+`handleWebSocketUpgrade` (`handlers/websocket.ts`) validates the `Origin` header against `CORS_ALLOWED_ORIGINS`:
+- **Why Origin validation is needed:** WebSocket upgrade handshakes bypass standard CORS preflights. While socket tickets are single-use and minted via Bearer-authenticated tRPC calls, Bearer tokens only provide incidental protection (browsers do not attach custom Authorization headers cross-origin). If socket authentication ever shifts to ambient credentials (such as cookies or session identifiers), cross-origin websites could establish unauthorized WebSocket connections on behalf of logged-in users. Validating `Origin` provides designed CSWSH protection.
+- **Why absent-Origin is allowed:** Browsers unconditionally attach the `Origin` header to all WebSocket upgrade requests, making it unforgeable in browser contexts. Non-browser clients (automated integration tests, monitoring probes, CLI tools) often omit the `Origin` header. Permitting absent `Origin` preserves testing and tooling interoperability while strictly enforcing the allowlist for all browser-originated requests.
+
+### Non-Mutating Security Headers (`applyWorkerSecurityHeaders`)
+
+`applyWorkerSecurityHeaders` (`cors.ts`) reconstructs `new Response(response.body, { status, statusText, headers: new Headers(response.headers) })` rather than mutating `response.headers` in place.
+- **Durable Object RPC immutability:** Responses returned across Durable Object RPC stubs (`stub.fetch(request)`) carry immutable header guards in the Cloudflare Workers runtime. In-place `.headers.set()` on a DO-generated response (such as a `400 "Missing ticket or eventId"`) throws `TypeError: Can't modify immutable headers`, which Sentry's outer handler would escalate into an unexpected 500 error.
+- Reconstructing the `Response` with cloned `Headers` ensures uniform, safe application of security headers across both locally constructed responses and DO stub responses. All call sites (including `index.ts`'s tRPC handler) capture the returned reconstructed `Response`.

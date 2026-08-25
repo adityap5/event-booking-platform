@@ -50,12 +50,13 @@ export const ticketsRouter = {
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Booking not found' });
       }
 
-      // ── Status guard: only confirmed bookings have tickets ───────────────────
-      if (row.bookingStatus !== 'confirmed') {
-        throw new TRPCError({ code: 'NOT_FOUND', message: 'No ticket available for this booking' });
-      }
-
       // ── Authorization ────────────────────────────────────────────────────────
+      // Authorization is checked immediately after existence and BEFORE status verification.
+      // Checking status before authorization would allow unauthorized callers to probe
+      // arbitrary booking IDs and distinguish confirmed vs pending/cancelled bookings.
+      // Non-existent booking IDs returning NOT_FOUND is an accepted trade-off because
+      // booking IDs are unguessable UUIDs.
+      //
       // Path A: the caller is the booking's own attendee.
       const isOwnAttendee = ctx.userId === row.attendeeUserId;
 
@@ -84,6 +85,11 @@ export const ticketsRouter = {
             message: 'You do not have permission to access this ticket.',
           });
         }
+      }
+
+      // ── Status guard: only confirmed bookings have tickets ───────────────────
+      if (row.bookingStatus !== 'confirmed') {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'No ticket available for this booking' });
       }
 
       // ── R2 fetch ─────────────────────────────────────────────────────────────

@@ -132,7 +132,7 @@ export default Sentry.withSentry(
         return applyWorkerSecurityHeaders(bodyCheck.response);
       }
 
-      const response = await fetchRequestHandler({
+      let response = await fetchRequestHandler({
         endpoint: '/trpc',
         req: bodyCheck.request,
         router: appRouter,
@@ -166,7 +166,7 @@ export default Sentry.withSentry(
       // Append CORS, Cache-Control, and Security headers to the tRPC response
       response.headers.set('Access-Control-Allow-Origin', resolveAllowedOrigin(request));
       response.headers.set('Cache-Control', 'no-store');
-      applyWorkerSecurityHeaders(response);
+      response = applyWorkerSecurityHeaders(response);
       return response;
     },
     async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
