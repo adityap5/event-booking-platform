@@ -5,6 +5,7 @@ import { bookingsRouter } from './routers/bookings.js';
 import { paymentsRouter } from './routers/payments.js';
 import { realtimeRouter } from './routers/realtime.js';
 import { ticketsRouter } from './routers/tickets.js';
+import { refundsRouter } from './routers/refunds.js';
 
 export const appRouter = router({
   ...miscRouter,
@@ -13,6 +14,7 @@ export const appRouter = router({
   ...paymentsRouter,
   ...realtimeRouter,
   ...ticketsRouter,
+  ...refundsRouter,
 });
 
 export type AppRouter = typeof appRouter;

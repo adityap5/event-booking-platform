@@ -75,7 +75,12 @@ export const bookings = sqliteTable(
     attendeeId: text('attendee_id')
       .notNull()
       .references(() => attendees.id, { onDelete: 'cascade' }),
-    status: text('status', { enum: ['pending', 'confirmed', 'cancelled'] })
+    // Status semantic distinction:
+    // - 'pending': temporary reservation hold awaiting payment.
+    // - 'confirmed': payment succeeded and booking is active.
+    // - 'cancelled': payment failed or was abandoned before confirmation (booking was never completed/sold).
+    // - 'refunded': booking was genuinely confirmed and sold, then subsequently financially reversed via Stripe refund.
+    status: text('status', { enum: ['pending', 'confirmed', 'cancelled', 'refunded'] })
       .notNull()
       .default('pending'),
     holdId: text('hold_id'),  // nullable — pre-existing bookings have no holdId

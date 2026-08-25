@@ -42,7 +42,7 @@ class SeatLedgerBase extends DurableObject<Env> {
   }
 
   private logEvent(event: {
-    type: 'RESERVED' | 'CONFIRMED' | 'RELEASED' | 'EXPIRED' | 'ALREADY_USED' | 'NOT_FOUND' | 'SOLD_OUT' | 'TOO_MANY_PENDING_HOLDS'
+    type: 'RESERVED' | 'CONFIRMED' | 'RELEASED' | 'REFUNDED' | 'EXPIRED' | 'ALREADY_USED' | 'NOT_FOUND' | 'SOLD_OUT' | 'TOO_MANY_PENDING_HOLDS'
     holdId?: string
     eventId?: string
     userId?: string
@@ -213,6 +213,65 @@ class SeatLedgerBase extends DurableObject<Env> {
       seatCount: hold.seat_count as number,
       // Note: eventId is omitted here as it's not stored in the DO (DO is already 1:1 with an event)
     };
+  }
+  /**
+   * =========================================================================
+   * STATE MACHINE INVARIANT — REFUND FLOW
+   * =========================================================================
+   * - 'pending' and 'confirmed' reservations consume seats (count toward usedSeats).
+   * - 'released' and 'refunded' reservations do not.
+   * - Refunding a 'confirmed' reservation returns its entire seatCount to availability —
+   *   not partially, and not via any separate counter adjustment; purely by the status
+   *   transition dropping out of the getAvailableSeats() sum, exactly as 'released'
+   *   already does for expired pending holds.
+   * - A 'refunded' reservation must never be reachable via any code path that treats it
+   *   as still-pending or as an unconfirmed sale.
+   * - The 'pending → confirmed → refunded' lifecycle and the 'pending → released'
+   *   lifecycle are separate paths that must never cross:
+   *     - refundSeat() only ever transitions 'confirmed' → 'refunded'.
+   *     - releaseSeat() / alarm() only ever transition 'pending' → 'released'.
+   *   Neither method gains awareness of the other's states beyond rejecting them cleanly.
+   * =========================================================================
+   */
+  async refundSeat(holdId: string): Promise<void> {
+    const holds = this.ctx.storage.sql.exec("SELECT user_id, seat_count, status, expires_at FROM reservations WHERE id = ?", holdId).toArray();
+    if (holds.length === 0) {
+      this.logEvent({ type: 'NOT_FOUND', holdId, reason: 'HOLD_NOT_FOUND' });
+      throw new Error('HOLD_NOT_FOUND');
+    }
+
+    const hold = holds[0]!;
+    const status = hold.status as string;
+
+    if (status === 'refunded') {
+      this.logEvent({ type: 'ALREADY_USED', holdId, reason: 'HOLD_ALREADY_REFUNDED' });
+      throw new Error('HOLD_ALREADY_REFUNDED');
+    }
+
+    if (status === 'pending') {
+      this.logEvent({ type: 'ALREADY_USED', holdId, reason: 'HOLD_NOT_CONFIRMED' });
+      throw new Error('HOLD_NOT_CONFIRMED');
+    }
+
+    if (status === 'released') {
+      this.logEvent({ type: 'ALREADY_USED', holdId, reason: 'HOLD_RELEASED' });
+      throw new Error('HOLD_RELEASED');
+    }
+
+    if (status !== 'confirmed') {
+      this.logEvent({ type: 'ALREADY_USED', holdId, reason: `INVALID_STATUS_${status}` });
+      throw new Error(`HOLD_INVALID_STATUS_${status}`);
+    }
+
+    this.ctx.storage.sql.exec("UPDATE reservations SET status = 'refunded' WHERE id = ?", holdId);
+    this.logEvent({
+      type: 'REFUNDED',
+      holdId,
+      userId: hold.user_id as string,
+      seatCount: hold.seat_count as number,
+    });
+
+    this.broadcastSeatCount();
   }
 
   async releaseSeat(holdId: string): Promise<void> {

@@ -385,6 +385,8 @@ depends on. Now `.int()`, matching `totalSeats`'s existing convention. `pricePer
 
 - **Clerk webhook org-ownership conflict** (`handlers/clerk-webhook.ts`): `organisations.ownerId` has a unique index (one org per Clerk user, by design). The webhook previously used `.onConflictDoNothing()` on insert — a second organisation created by the same user silently vanished: no error, no log, `200` to Clerk, and the org existed in Clerk with no D1 row. The failure only surfaced later as a confusing FK error on `createEvent`. Now the specific `owner_id` constraint violation is detected narrowly (matched against the real D1/SQLite error message — `"organisations.owner_id"` — not a blanket catch of any unique-constraint failure, which would have also caught unrelated conflicts like `attendee_user_idx`) and logged loudly as `[ORG_OWNER_CONFLICT]` with both org IDs and the owner ID. Still returns `200` — this is a permanent business-rule violation, not a transient failure, so making Clerk retry achieves nothing; the log is the intended alerting surface once Sentry/Axiom land (Days 5-6). Any other DB error still returns `500` as before, verified by a dedicated regression test proving the new handling doesn't accidentally widen into "all DB failures return 200."
 
+  **Update (A2: Org-Creation Loophole Fix):** the authoritative fix is now a Clerk Dashboard setting — organization-creation limit set to 1 per user — which closes this at the platform level, before any request reaches this app at all. The frontend `appearance.elements` CSS hide (`organizationSwitcherPopoverActionButton__createOrganization: { display: 'none' }`) and the backend FK-violation handling in `createEvent` are both still in place, but their role has changed: the CSS hide is now pure UX polish (avoids showing a button that would fail anyway), and the backend handling is now a defense-in-depth safety net for a case Clerk itself should prevent, not the load-bearing fix. Worth noting for anyone revisiting this later: the CSS hide alone was never a real access-control boundary — it's a visual-only change that a user could bypass via dev tools — so if the Clerk dashboard setting is ever reset or misconfigured, that specific defense reverts to nothing, while the backend handling continues to hold.
+
 - **`bookings` table indexes**: added `booking_hold_idx` on `hold_id` (two live queries filter on it — `routers/bookings.ts`, `handlers/stripe-webhook.ts` —
 neither had an index to use). Dropped `booking_stripe_idx` on `stripe_payment_intent_id` — confirmed via grep to be queried nowhere in the codebase; its own inline comment describing a webhook lookup pattern stopped being accurate after Day 1's webhook rewrite moved to querying by `holdId` instead. Generated via `drizzle-kit generate`, not hand-written, per the project's migration convention.
 
@@ -536,6 +538,10 @@ In practice, the detection latency from confirmation failure to alert is: expiry
 
 The method only reads from DO SQLite; it does not modify any row. This is enforced in the test suite with a zero-mutation assertion matching the pattern used for `getHold()`: the test calls `listConfirmedHolds()`, then verifies that the DO's state (available seats, reservation statuses) is identical before and after the call. This prevents someone from "helpfully" adding cleanup logic to the method in a future pass and inadvertently breaking the reconciliation job's invariant that it never mutates DO state.
 
+**Reconciliation Scaling & Event Date Filter (A3):**
+
+**Known limitation:** the events-date filter (`gte(events.date, cutoffDate)`) relies on `reserveSeat`'s "event already started" guard, which was introduced in this same fix. Any hold created before that guard existed, for an event dated more than 7 days in the past, would not be checked by this filter going forward. In practice this is low-impact: such holds would already be long-resolved (confirmed or expired) given the 15-minute hold lifecycle, so this only matters for genuinely stale, already-settled historical data — not anything currently in flight.
+
 ---
 
 ## 17. `hold_released_alarm` — Deliberately Excluded from D1 (Day 7, Phase 2)
@@ -648,3 +654,69 @@ Worth stating explicitly: this fails **closed**, not open. If the key is ever ou
 ## 23. Lazy Attendee Creation
 
 Attendee rows are created lazily, on first use (`ensureAttendee` in `apps/worker/src/routers/bookings.ts`, lines 106–148), rather than eagerly at sign-up — mirroring the pattern used for organisation sync via the Clerk webhook, but implemented differently: rather than waiting for an async webhook to populate the row, `ensureAttendee` calls Clerk's API directly and synchronously at creation time (`clerk.users.getUser(ctx.userId)`) to get the real name/email immediately. The placeholder values (`''` email, `'Attendee'` name) are a degrade-gracefully fallback for if that live Clerk API call itself fails — not the primary path. A concurrent double-insert race (two simultaneous first-time calls) is handled by catching the resulting unique-constraint error and re-reading the now-existing row rather than failing the request.
+
+---
+
+## 24. Organiser-Initiated Refund Flow (Day 9, Phase 2)
+
+Stretch item 2 of 4 from `PHASE_2_PLAN.md`: organiser-initiated full refunds via Stripe, returning released seats directly to the SeatLedger Durable Object and updating durable booking status in D1.
+
+### 1. State Machine Invariant & Semantic Status Distinction
+
+**Semantic Distinction in D1 & Durable Object:**
+- **`'cancelled'` vs `'refunded'` (D1 `bookings.status`):**
+  - `'cancelled'`: payment was never successfully completed (e.g. checkout abandoned, payment failed via webhook). The booking was never sold.
+  - `'refunded'`: the booking was genuinely confirmed, paid for, and active, and subsequently financially reversed by an organiser refund.
+- **`'released'` vs `'refunded'` (DO `reservations.status`):**
+  - `'released'`: a pending hold that expired or was released by the attendee prior to payment.
+  - `'refunded'`: a confirmed seat hold that was successfully sold and later refunded.
+
+**The Central Invariant:**
+- `pending` and `confirmed` reservations consume seats: `used_seats = SUM(seat_count) WHERE status = 'pending' OR status = 'confirmed'`.
+- `released` and `refunded` reservations do NOT consume seats.
+- Refunding a confirmed reservation returns its **entire** `seatCount` to availability immediately and purely by dropping out of the `SUM()` query in `getAvailableSeats()` — with no manual arithmetic, counters, or partial adjustments.
+- The `pending → confirmed → refunded` lifecycle and the `pending → released` lifecycle are strictly separate, non-crossing paths:
+  - `refundSeat()` only ever transitions `confirmed → refunded`.
+  - `releaseSeat()` / alarm only ever transition `pending → released`.
+  - Neither method gains awareness of the other's states beyond cleanly rejecting invalid transitions.
+
+### 2. Ownership Boundary
+
+- **Durable Object owns:** seat reservation state, the `confirmed → refunded` transition, real-time availability math (`getAvailableSeats()`), and broadcasting updated seat counts to connected WebSocket clients (`broadcastSeatCount()`).
+- **D1 owns:** durable booking business records, historical status for attendees and organisers, and immutable audit logs (`audit_log`).
+- D1 never tracks or tallies seat counts; the DO is the single source of truth for seat capacity.
+
+### 3. Order of Operations & Failure Isolation
+
+The mutation executes in strict sequence:
+1. **D1 fetch & Authorization:** Organiser authentication and organisation ownership are verified via `requireOrganiserRole(ctx, 'organiser')` and `authorizeOrganiserAccess(ctx, eventOrgId)` before any Stripe interaction can take place.
+2. **Stripe Refund:** Stripe owns the actual financial money movement. It executes first with a deterministic idempotency key (`refund_${bookingId}`).
+3. **DO `refundSeat()`:** Releases the seat in the DO's SQLite storage and broadcasts the new seat count.
+4. **Conditional D1 Status Update:** Updates `bookings.status` to `'refunded'` where `id = bookingId AND status = 'confirmed'`.
+5. **Audit Log:** Writes an `audit_log` entry with `eventType: 'booking_refunded'`.
+
+**Failure Isolation:**
+If Stripe succeeds but the DO or D1 step throws unexpectedly:
+- The mutation still reports **success** to the organiser to prevent double-refund attempts on retry (since Stripe has already moved the money).
+- An alert is sent to Sentry at `error` level with full diagnostic context (`step`, `bookingId`, `holdId`, `eventId`, `stripePaymentIntentId`, `stripeRefundId`) enabling manual operational recovery without quiet data fabrication.
+
+### 4. Stripe Idempotency Key vs. Already-Refunded Recovery
+
+These are two distinct mechanisms:
+- **Deterministic Idempotency Key (`refund_${bookingId}`):** Passed as `{ idempotencyKey: \`refund_\${bookingId}\` }` in `stripe.refunds.create()`. Protects against network drops or retries of the exact same request, causing Stripe to replay the original refund object without creating duplicate charges.
+- **Already-Refunded Recovery:** Handles refunds that already exist (e.g., retrying after a prior partial local failure or manual Stripe refund).
+  - Triggered strictly by structured Stripe error types: `StripeInvalidRequestError` with code `'charge_already_refunded'`.
+  - Verification requirements:
+    1. Retrieves the PaymentIntent via `stripe.paymentIntents.retrieve(stripePaymentIntentId)`.
+    2. Lists all refunds across all pages using `stripe.refunds.list({ payment_intent, limit: 100 })`.
+    3. Confirms that all refunds belong to this exact `stripePaymentIntentId`, have `status === 'succeeded'`, and aggregate to `paymentIntent.amount_received`.
+    4. If fully verified, proceeds with local DO and D1 state reconciliation; otherwise rejects safely with an `error` level Sentry alert.
+
+### 5. Concurrency Handling & Single Audit Log Guarantee
+
+When two organiser refund requests for the same booking arrive simultaneously:
+- **Stripe:** Deduplicated by the deterministic idempotency key.
+- **DO:** Synchronized by the DO's single-threaded event loop; the second caller receives `HOLD_ALREADY_REFUNDED`, which is treated as idempotent success.
+- **D1:** Guarded by conditional `UPDATE bookings SET status = 'refunded' WHERE id = ? AND status = 'confirmed'`. Drizzle's `.returning()` identifies whether 0 or 1 rows were modified.
+  - **1 row returned:** This caller won the transition and writes the single `booking_refunded` audit log.
+  - **0 rows returned:** Another caller won the transition. The caller re-reads the booking from D1 to confirm status is `'refunded'`. If verified, it skips audit logging without error. If D1 has an unexpected non-refunded status, an error is alerted to Sentry.

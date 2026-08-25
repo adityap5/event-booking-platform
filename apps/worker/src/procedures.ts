@@ -18,6 +18,7 @@ export interface WorkerEnv {
       initialize: (seats: number) => Promise<void>;
       reserveSeat: (userId: string, seats: number) => Promise<{ reservationId: string; expiresAt: number }>;
       confirmSeat: (holdId: string) => Promise<{ userId: string; seatCount: number }>;
+      refundSeat: (holdId: string) => Promise<void>;
       releaseSeat: (holdId: string) => Promise<void>;
       getHold: (holdId: string) => Promise<{ userId: string; seatCount: number; status: string; expiresAt: number } | null>;
       listConfirmedHolds: (since?: number) => Promise<{ id: string; userId: string; seatCount: number; expiresAt: number }[]>;

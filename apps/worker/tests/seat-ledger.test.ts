@@ -509,4 +509,134 @@ describe('SeatLedger DO & reserveSeat regression tests', () => {
       expect(allResults).toHaveLength(2);
     });
   });
+
+  describe('refundSeat() DO transitions & state-machine invariants', () => {
+    it('successfully transitions confirmed hold to refunded and immediately releases full seat count', async () => {
+      const eventId = 'test-refund-seat-happy';
+      const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+      await stub.initialize(10);
+
+      const hold = await stub.reserveSeat('user-1', 4);
+      expect(await stub.getAvailableSeats()).toBe(6);
+
+      await stub.confirmSeat(hold.reservationId);
+      expect(await stub.getAvailableSeats()).toBe(6);
+
+      // Refund the hold
+      await stub.refundSeat(hold.reservationId);
+
+      // Invariant: full seat count (4 seats) returned to availability immediately
+      expect(await stub.getAvailableSeats()).toBe(10);
+
+      const holdDetails = await stub.getHold(hold.reservationId);
+      expect(holdDetails?.status).toBe('refunded');
+      expect(holdDetails?.seatCount).toBe(4);
+    });
+
+    it('throws HOLD_NOT_FOUND for non-existent hold', async () => {
+      const eventId = 'test-refund-not-found';
+      const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+      await stub.initialize(10);
+
+      await expect(
+        runInDurableObject(stub, (instance: SeatLedger) => {
+          return instance.refundSeat('non-existent-hold-id');
+        })
+      ).rejects.toThrowError('HOLD_NOT_FOUND');
+    });
+
+    it('throws HOLD_ALREADY_REFUNDED when attempting to refund an already refunded hold', async () => {
+      const eventId = 'test-refund-already-refunded';
+      const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+      await stub.initialize(10);
+
+      const hold = await stub.reserveSeat('user-1', 2);
+      await stub.confirmSeat(hold.reservationId);
+      await stub.refundSeat(hold.reservationId);
+
+      // Second attempt must throw distinct HOLD_ALREADY_REFUNDED
+      await expect(
+        runInDurableObject(stub, (instance: SeatLedger) => {
+          return instance.refundSeat(hold.reservationId);
+        })
+      ).rejects.toThrowError('HOLD_ALREADY_REFUNDED');
+    });
+
+    it('throws HOLD_NOT_CONFIRMED when attempting to refund a pending hold', async () => {
+      const eventId = 'test-refund-pending';
+      const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+      await stub.initialize(10);
+
+      const hold = await stub.reserveSeat('user-1', 2);
+      // Still pending
+      await expect(
+        runInDurableObject(stub, (instance: SeatLedger) => {
+          return instance.refundSeat(hold.reservationId);
+        })
+      ).rejects.toThrowError('HOLD_NOT_CONFIRMED');
+    });
+
+    it('throws HOLD_RELEASED when attempting to refund an expired/released hold', async () => {
+      const eventId = 'test-refund-released';
+      const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+      await stub.initialize(10);
+
+      const hold = await stub.reserveSeat('user-1', 2);
+      await stub.releaseSeat(hold.reservationId);
+
+      await expect(
+        runInDurableObject(stub, (instance: SeatLedger) => {
+          return instance.refundSeat(hold.reservationId);
+        })
+      ).rejects.toThrowError('HOLD_RELEASED');
+    });
+
+    it('releaseSeat() refuses to touch confirmed or refunded holds', async () => {
+      const eventId = 'test-release-guard-untouched';
+      const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+      await stub.initialize(10);
+
+      const hold1 = await stub.reserveSeat('user-1', 2);
+      await stub.confirmSeat(hold1.reservationId);
+
+      // releaseSeat on confirmed hold is a no-op
+      await stub.releaseSeat(hold1.reservationId);
+      let details1 = await stub.getHold(hold1.reservationId);
+      expect(details1?.status).toBe('confirmed');
+      expect(await stub.getAvailableSeats()).toBe(8);
+
+      // refund the hold
+      await stub.refundSeat(hold1.reservationId);
+      expect(await stub.getAvailableSeats()).toBe(10);
+
+      // releaseSeat on refunded hold is a no-op
+      await stub.releaseSeat(hold1.reservationId);
+      let details2 = await stub.getHold(hold1.reservationId);
+      expect(details2?.status).toBe('refunded');
+      expect(await stub.getAvailableSeats()).toBe(10);
+    });
+
+    it('listConfirmedHolds() excludes refunded holds', async () => {
+      const eventId = 'test-list-confirmed-excludes-refunded';
+      const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+      await stub.initialize(10);
+
+      const hold1 = await stub.reserveSeat('user-1', 2);
+      const hold2 = await stub.reserveSeat('user-2', 3);
+      await stub.confirmSeat(hold1.reservationId);
+      await stub.confirmSeat(hold2.reservationId);
+
+      let confirmed = await stub.listConfirmedHolds();
+      expect(confirmed).toHaveLength(2);
+
+      // Refund hold1
+      await stub.refundSeat(hold1.reservationId);
+
+      // listConfirmedHolds must now only return hold2
+      confirmed = await stub.listConfirmedHolds();
+      expect(confirmed).toHaveLength(1);
+      expect(confirmed[0]?.id).toBe(hold2.reservationId);
+    });
+  });
 });
+
