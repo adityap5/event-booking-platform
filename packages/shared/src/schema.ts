@@ -129,11 +129,46 @@ export const auditLog = sqliteTable(
   }
 );
 
-// ── Relations (Drizzle ORM Object Relational API) ───────────────────────────────────
+export const organisationApiKeys = sqliteTable(
+  'organisation_api_keys',
+  {
+    id: text('id').primaryKey().$defaultFn(generateId),
+    organisationId: text('organisation_id')
+      .notNull()
+      .references(() => organisations.id, { onDelete: 'cascade' }),
+    keyHash: text('key_hash').notNull(),
+    keyPrefix: text('key_prefix').notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .default(sql`(strftime('%s', 'now'))`),
+    revokedAt: integer('revoked_at', { mode: 'timestamp' }),
+  },
+  (table) => {
+    return [
+      // Enables fast indexed lookup by hashed API key for incoming public API requests
+      uniqueIndex('org_api_keys_hash_idx').on(table.keyHash),
+      // Partial unique index structurally enforcing "one active key per organisation"
+      uniqueIndex('org_api_keys_active_org_idx')
+        .on(table.organisationId)
+        .where(sql`revoked_at IS NULL`),
+      // Foreign key index for cascade lookups and organisation-scoped queries
+      index('org_api_keys_org_idx').on(table.organisationId),
+    ];
+  }
+);
 
+// ── Relations (Drizzle ORM Object Relational API) ───────────────────────────────────
 
 export const organisationsRelations = relations(organisations, ({ many }) => ({
   events: many(events),
+  apiKeys: many(organisationApiKeys),
+}));
+
+export const organisationApiKeysRelations = relations(organisationApiKeys, ({ one }) => ({
+  organisation: one(organisations, {
+    fields: [organisationApiKeys.organisationId],
+    references: [organisations.id],
+  }),
 }));
 
 export const eventsRelations = relations(events, ({ one, many }) => ({
@@ -158,4 +193,5 @@ export const bookingsRelations = relations(bookings, ({ one }) => ({
     references: [attendees.id],
   }),
 }));
+
 

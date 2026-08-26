@@ -13,6 +13,7 @@ import { handleClerkWebhook } from './handlers/clerk-webhook.js';
 import { handleStripeWebhook } from './handlers/stripe-webhook.js';
 import { handleUpload } from './handlers/upload.js';
 import { handleWebSocketUpgrade } from './handlers/websocket.js';
+import { handlePublicApi } from './handlers/public-api.js';
 import { runReconciliation } from './reconciliation.js';
 
 export type Env = {
@@ -114,6 +115,9 @@ export default Sentry.withSentry(
         }
         return applyWorkerSecurityHeaders(wsResponse);
       }
+
+      const publicApiResponse = await handlePublicApi(request, env);
+      if (publicApiResponse) return applyWorkerSecurityHeaders(publicApiResponse);
 
       // Handle CORS preflight requests for tRPC
       if (request.method === 'OPTIONS') {

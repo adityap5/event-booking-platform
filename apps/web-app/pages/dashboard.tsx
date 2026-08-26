@@ -113,6 +113,9 @@ export default function DashboardPage() {
             <Link href="/dashboard/billing" style={{ display: 'inline-block', padding: '0.5rem 1rem', fontSize: '1rem', backgroundColor: '#f3f4f6', color: '#1f2937', textDecoration: 'none', borderRadius: '4px', fontWeight: 500, border: '1px solid #d1d5db' }}>
               Billing &amp; Subscription
             </Link>
+            <Link href="/dashboard/api-keys" style={{ display: 'inline-block', padding: '0.5rem 1rem', fontSize: '1rem', backgroundColor: '#f3f4f6', color: '#1f2937', textDecoration: 'none', borderRadius: '4px', fontWeight: 500, border: '1px solid #d1d5db' }}>
+              API Keys
+            </Link>
           </div>
         </div>
       ) : (

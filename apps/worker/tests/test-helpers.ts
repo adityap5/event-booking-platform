@@ -8,6 +8,7 @@ import m1 from '../migrations/0001_white_korath.sql?raw';
 import m2 from '../migrations/0002_lyrical_retro_girl.sql?raw';
 import m3 from '../migrations/0003_kind_ikaris.sql?raw';
 import m4 from '../migrations/0004_petite_tiger_shark.sql?raw';
+import m5 from '../migrations/0005_awesome_omega_red.sql?raw';
 
 /**
  * Initializes the D1 database tables in Miniflare test environment
@@ -16,12 +17,13 @@ import m4 from '../migrations/0004_petite_tiger_shark.sql?raw';
 export async function setupTestDb(d1: D1Database): Promise<DrizzleD1Database<typeof schema>> {
   // Drop tables in reverse foreign-key order to ensure a clean state per test
   await d1.prepare('DROP TABLE IF EXISTS audit_log;').run();
+  await d1.prepare('DROP TABLE IF EXISTS organisation_api_keys;').run();
   await d1.prepare('DROP TABLE IF EXISTS bookings;').run();
   await d1.prepare('DROP TABLE IF EXISTS events;').run();
   await d1.prepare('DROP TABLE IF EXISTS attendees;').run();
   await d1.prepare('DROP TABLE IF EXISTS organisations;').run();
 
-  const migrations = [m0, m1, m2, m3, m4];
+  const migrations = [m0, m1, m2, m3, m4, m5];
 
   for (const migration of migrations) {
     const statements = migration.split('--> statement-breakpoint');

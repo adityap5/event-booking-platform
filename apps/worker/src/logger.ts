@@ -2,7 +2,7 @@ export interface StructuredLogPayload {
   category: 'rate_limit_rejection' | 'invariant_violation';
   action: string;
   userId?: string;
-  keyType?: 'ip' | 'userId' | 'orgId';
+  keyType?: 'ip' | 'userId' | 'orgId' | 'apiKey';
   orgId?: string;
   holdId?: string;
   eventId?: string;

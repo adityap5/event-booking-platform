@@ -750,3 +750,74 @@ When two organiser refund requests for the same booking arrive simultaneously:
 - **Subscription Staleness & Out-of-Order Guards:**
   - Webhook event updates (`updated` and `deleted`) verify that `subscription.id === organisation.stripeSubscriptionId` before modifying `subscriptionStatus`. Events for stale or replaced subscriptions are logged and ignored, preventing old events from regressing entitlement state.
   - If a `customer.subscription.updated` event arrives before `customer.subscription.created` when `organisations.stripeSubscriptionId` is null, the handler establishes the subscription via the atomic CAS claim.
+
+---
+
+## Day 11 — Public Read-Only API (API-Key Authenticated)
+
+### 1. Per-Organisation Scoping vs. Platform-Wide Public Listings
+- **Platform-Wide Public Listings (`listPublicEvents` / `getPublicEvent`):** Unauthenticated tRPC procedures returning all upcoming events across all organisations on the platform. These remain untouched for discovery on the main platform website.
+- **Organisation-Scoped Public API (`/api/v1/events`):** A dedicated, API-key-authenticated HTTP interface designed for third-party integrations (e.g. organisers embedding their own event calendars on external websites, native apps, or headless platforms). Each organisation generates its own API key and can query only its own events. Data from other organisations is strictly inaccessible and invisible.
+
+### 2. API Key Format, Hashing, and Reveal-Once Model
+- **Format:** `evbk_` static prefix followed by 256 bits of high-entropy cryptographically secure random bytes (64 hexadecimal characters) generated using Web Crypto's `crypto.getRandomValues()`.
+  - The static prefix matches industry standards (e.g., Stripe's `sk_live_`, GitHub's `ghp_`), allowing secret scanning scanners to detect leaked keys automatically.
+- **Storage & Lookups:** The raw key is **never** persisted in D1 or logged.
+  - A SHA-256 digest (`crypto.subtle.digest('SHA-256', ...)`) is computed upon key generation and stored in the `organisation_api_keys.key_hash` column.
+  - Incoming requests extract the `Bearer <key>` token, hash it with SHA-256, and perform an indexed equality lookup against `organisation_api_keys` where `revoked_at IS NULL`.
+- **Why SHA-256 vs. Slow Password Hashes (e.g. bcrypt/argon2):**
+  - Slow, memory-hard hashing algorithms exist to defend against dictionary attacks on human-chosen, low-entropy passwords.
+  - API keys have 256 bits of true cryptographic entropy ($2^{256}$ keyspace). Brute-forcing a 256-bit space is computationally infeasible.
+  - SHA-256 enables low-latency, zero-cost indexed lookup in Cloudflare Workers and D1 without wasting edge CPU cycles.
+- **Reveal-Once Lifecycle:**
+  - The full raw API key is returned in the HTTP response body **only once** at the instant of generation or rotation.
+  - Subsequent queries (`getApiKeyInfo`) and dashboard views only return the safe-to-display prefix (`evbk_` + first 8 characters + `...`) and `createdAt` timestamp.
+  - The raw key is never stored in browser `localStorage`/`sessionStorage`, never written to structured logs, never printed in console output, and never transmitted to Sentry.
+
+### 3. Structural Database Invariant & Atomic D1 Batch Operations
+- **One Active Key Invariant:** Each organisation may possess at most one active key at a time.
+- **Structural Database Enforcement:** Enforced natively at the database level via a Drizzle SQLite partial unique index:
+  ```sql
+  CREATE UNIQUE INDEX `org_api_keys_active_org_idx` ON `organisation_api_keys` (`organisation_id`) WHERE revoked_at IS NULL;
+  ```
+- **Atomic D1 Batch Operations (`db.batch()`):**
+  - Because D1 does not provide interactive `db.transaction()` rollbacks, key rotation and generation execute as an atomic D1 batch operation:
+    1. Statement 1: `UPDATE organisation_api_keys SET revoked_at = :now WHERE organisation_id = :orgId AND revoked_at IS NULL;`
+    2. Statement 2: `INSERT INTO organisation_api_keys (id, organisation_id, key_hash, key_prefix, created_at) VALUES (...);`
+  - The new raw key is returned to the caller only after the atomic batch operation completes successfully.
+  - Soft revocation (`revoked_at` timestamp) preserves historical audit records consistent with the platform's append-heavy architecture.
+
+### 4. Permissive CORS & Security Boundary Architecture
+- **Route-Specific Permissive CORS:**
+  - Public API routes (`/api/v1/events` and `/api/v1/events/:id`) respond with:
+    - `Access-Control-Allow-Origin: *`
+    - `Access-Control-Allow-Methods: GET, OPTIONS`
+    - `Access-Control-Allow-Headers: Authorization, Content-Type`
+    - `Access-Control-Max-Age: 86400`
+- **Security Boundary:**
+  - CORS is **not** an authentication boundary. The security boundary is the possession and server-side verification of the secret API key provided via the `Authorization: Bearer <key>` header.
+  - Permissive CORS (`*`) is secure here because authentication uses an explicit bearer token, not ambient browser credentials (cookies, HTTP basic auth, or session tokens).
+  - The platform's global frontend CORS allowlist (`CORS_ALLOWED_ORIGINS` in `cors.ts`) and all protected tRPC routes remain completely unchanged and strictly restricted.
+
+### 5. Exclusion of `lastUsedAt` Tracking
+- Updating a `last_used_at` timestamp on each incoming read request would convert a lightweight, read-only cacheable hot path into a write-per-request hotspot on D1.
+- To maintain maximum throughput and low latency, `lastUsedAt` tracking was deliberately excluded.
+
+### 6. Endpoint Contracts & Boundaries
+- **`GET /api/v1/events` (List Endpoint):**
+  - **Filter:** Future events only (`events.date >= now`) belonging to the API key's organisation, ordered by `events.date ASC`.
+  - **Public Safe Fields:** `id`, `name`, `date` (ms timestamp), `totalSeats`, `pricePerSeat`, `coverImageUrl`.
+  - **No DO Fanout:** Deliberately excludes live seat count Durable Object lookups to eliminate N+1 DO requests.
+  - **Pagination Contract:**
+    - `limit`: defaults to `50`, maximum `100` (clamped, not rejected).
+    - `offset`: defaults to `0`.
+    - Response structure: `{ events: [...], pagination: { limit, offset, hasMore } }`.
+- **`GET /api/v1/events/:id` (Single Event Endpoint):**
+  - **Filter:** Returns event where `events.id = :id` AND `events.organisationId = :orgId`. Allows retrieving past events belonging to the organisation.
+  - **Live Seat Composition:** Queries the event's `SeatLedger` DO (`stub.getAvailableSeats() ?? event.totalSeats`) and returns `availableSeats` in the JSON response.
+  - **Unified 404 Behavior:** Returns generic 404 `{ "error": "Not Found" }` identically if the event does not exist OR belongs to another organisation, preventing organisation resource enumeration.
+
+### 7. Organiser Authorization Gating
+- Organiser key-management mutations and queries (`generateApiKey`, `rotateApiKey`, `revokeApiKey`, `getApiKeyInfo`) in `apps/worker/src/routers/apiKeys.ts` require Clerk JWT authentication and enforce:
+  1. `requireOrganiserRole(ctx, 'organiser')`
+  2. `requireActiveOrganisation(ctx)`
