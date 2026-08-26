@@ -22,6 +22,7 @@ export type Env = {
   CLERK_WEBHOOK_SECRET: string;
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
+  STRIPE_SUBSCRIPTION_PRICE_ID: string;
   // Public deployed URLs — set as wrangler vars (non-secret), used to build
   // absolute image URLs and Stripe redirect URLs without hardcoding them in source.
   WORKER_URL: string;

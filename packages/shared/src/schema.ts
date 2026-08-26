@@ -13,11 +13,16 @@ export const organisations = sqliteTable(
     createdAt: integer('created_at', { mode: 'timestamp' })
       .notNull()
       .default(sql`(strftime('%s', 'now'))`),
+    stripeCustomerId: text('stripe_customer_id'),
+    stripeSubscriptionId: text('stripe_subscription_id'),
+    subscriptionStatus: text('subscription_status').notNull().default('inactive'),
   },
   (table) => {
     return [
       // Enables fast lookup by Clerk's userId when determining org ownership
       uniqueIndex('org_owner_idx').on(table.ownerId),
+      // Enables fast lookup by Stripe customer ID on incoming subscription webhooks
+      uniqueIndex('org_stripe_customer_idx').on(table.stripeCustomerId),
     ];
   }
 );

@@ -44,6 +44,7 @@ export async function handleClerkWebhook(request: Request, env: Env): Promise<Re
           id: evt.data.id,
           name: evt.data.name,
           ownerId: evt.data.created_by,
+          subscriptionStatus: 'inactive',
           // Clerk returns created_at as milliseconds, our schema expects a Date object because mode='timestamp'
           createdAt: evt.data.created_at ? new Date(evt.data.created_at) : new Date(),
         });

@@ -1,4 +1,5 @@
 import Head from 'next/head';
+import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { useEffect, useRef, useState } from 'react';
 import { OrganizationSwitcher, UserButton, useAuth } from '@clerk/nextjs';
@@ -14,6 +15,35 @@ const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
 export default function CreateEventPage() {
   const router = useRouter();
   const { getToken } = useAuth();
+
+  // ---- Subscription gate state ----
+  const [subLoading, setSubLoading] = useState(true);
+  const [subscriptionStatus, setSubscriptionStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    async function checkSubscription() {
+      try {
+        const trpc = createAuthenticatedTRPCClient(getToken);
+        const res = await trpc.getSubscriptionStatus.query();
+        if (active) {
+          setSubscriptionStatus(res.subscriptionStatus);
+        }
+      } catch {
+        if (active) {
+          setSubscriptionStatus('inactive');
+        }
+      } finally {
+        if (active) {
+          setSubLoading(false);
+        }
+      }
+    }
+    void checkSubscription();
+    return () => {
+      active = false;
+    };
+  }, [getToken]);
 
   // ---- Form fields ----
   const [name, setName] = useState('');
@@ -154,15 +184,37 @@ export default function CreateEventPage() {
 
         <h1 className={styles.title}>Create Event</h1>
 
-        <form className={styles.form} onSubmit={(e) => { void handleSubmit(e); }}>
-          {/* Name */}
-          <div className={styles.field}>
-            <label htmlFor="event-name" className={styles.label}>
-              Event name <span className={styles.required}>*</span>
-            </label>
-            <input
-              id="event-name"
-              type="text"
+        {subLoading ? (
+          <div style={{ display: 'flex', justifyContent: 'center', padding: '3rem 1rem', color: '#6b7280' }}>
+            <p>Checking organisation subscription entitlement…</p>
+          </div>
+        ) : subscriptionStatus !== 'active' && subscriptionStatus !== 'trialing' ? (
+          <div className={styles.subscriptionCard}>
+            <div className={styles.subscriptionWarning}>
+              <strong>Active subscription required:</strong> Your organisation currently has a <code>{subscriptionStatus ?? 'inactive'}</code> subscription. An active subscription is required to publish and host new events.
+            </div>
+            <p style={{ color: '#4b5563', lineHeight: 1.6 }}>
+              Existing events and bookings are unaffected, but you must subscribe or resolve any payment issues before creating new events.
+            </p>
+            <div className={styles.subscriptionActions}>
+              <Link href="/dashboard/billing" className={styles.subscriptionButton}>
+                Go to Billing &amp; Subscription
+              </Link>
+              <Link href="/dashboard" className={styles.subscriptionSecondaryLink}>
+                Back to Dashboard
+              </Link>
+            </div>
+          </div>
+        ) : (
+          <form className={styles.form} onSubmit={(e) => { void handleSubmit(e); }}>
+            {/* Name */}
+            <div className={styles.field}>
+              <label htmlFor="event-name" className={styles.label}>
+                Event name <span className={styles.required}>*</span>
+              </label>
+              <input
+                id="event-name"
+                type="text"
               className={styles.input}
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -288,6 +340,7 @@ export default function CreateEventPage() {
             </button>
           </div>
         </form>
+        )}
       </div>
     </RequireOrgAuth>
   );

@@ -720,3 +720,33 @@ When two organiser refund requests for the same booking arrive simultaneously:
 - **D1:** Guarded by conditional `UPDATE bookings SET status = 'refunded' WHERE id = ? AND status = 'confirmed'`. Drizzle's `.returning()` identifies whether 0 or 1 rows were modified.
   - **1 row returned:** This caller won the transition and writes the single `booking_refunded` audit log.
   - **0 rows returned:** Another caller won the transition. The caller re-reads the booking from D1 to confirm status is `'refunded'`. If verified, it skips audit logging without error. If D1 has an unexpected non-refunded status, an error is alerted to Sentry.
+
+---
+
+## Day 10 — Organisation Subscription
+
+### 1. Business Model & Grandfathering Decision
+- **Clean Slate Policy (No Grandfathering):** All organisations uniformly require an active (`active` or `trialing`) subscription to publish and create events from Day 10 onwards. There is no `not_required` status, no `subscriptionRequired` boolean flag, and no manual backfill migration.
+- **Column Default:** `organisations.subscription_status` defaults strictly to `'inactive'` at the database schema level for all organisations.
+- **Targeted Action Gating:** Only `createEvent` is gated by subscription status. Existing published events, bookings, attendees, ticket downloads, event updates (`updateEvent`), and uploads remain accessible even if an organisation's subscription is later canceled or past due.
+
+### 2. Stripe Integration & Webhook Architecture
+- **Separation of Domains:** Subscription billing is cleanly modularised in `apps/worker/src/routers/subscriptions.ts` and `apps/worker/src/subscription-helpers.ts`. It remains completely decoupled from ticket purchases, attendee payments, and the Day 9 refund flow. Attendees never receive Stripe Customer records; organisations map 1:1 to Stripe Customer records.
+- **Proactive Customer Creation:** When an organiser calls `createSubscriptionCheckout`, the worker creates and stores `stripeCustomerId` in D1 *before* generating the Checkout Session in `mode: 'subscription'`.
+- **Why `checkout.session.completed` Is Not Used:** Because `stripeCustomerId` is already persisted on the organisation row, Stripe's native `customer.subscription.*` events (`created`, `updated`, `deleted`) deliver complete `Stripe.Subscription` objects containing `.id`, `.customer`, and `.status`. In contrast, `checkout.session.completed` delivers only an unexpanded `subscription` ID string without `.status`. Relying directly on `customer.subscription.*` events ensures a unified lifecycle model.
+- **Why `invoice.payment_failed` Is Out of Scope:** Day 10 implements server-side entitlement gating based on current status. When payments fail, Stripe transitions subscription status to `past_due` or `unpaid`, firing `customer.subscription.updated` which immediately updates entitlement. Proactive notifications (e.g. sending warning emails to organisers before cancellation) are a distinct notification feature for future roadmap consideration.
+
+### 3. Concurrency & Invariant Protections
+- **Server Authority & Role Authorization:**
+  - `getSubscriptionStatus` strictly enforces `requireOrganiserRole(ctx, 'organiser')` so attendees cannot query organisation subscription state.
+  - `getOrCreateStripeCustomer(db, stripe, orgId)` loads organisation attributes (such as `name`) directly from D1, ensuring caller-supplied inputs cannot inject or override organisation metadata.
+- **Persistence Invariant Guard:**
+  - `getOrCreateStripeCustomer` will never return a transient Stripe Customer ID if the conditional D1 persistence/re-fetch invariant cannot be verified. It immediately throws an internal error, preventing Checkout from proceeding with an unlinked or orphaned customer ID.
+- **Atomic Compare-and-Set (CAS) Subscription Establishment:**
+  - In `customer.subscription.created` and the out-of-order `customer.subscription.updated` handler, subscription ownership is claimed via an atomic conditional D1 update (`WHERE id = ? AND (stripe_subscription_id IS NULL OR subscription_status = 'canceled')`).
+  - Ownership is determined strictly from the affected-row count (`.returning()`). If the claim loses the race (0 rows updated), the worker re-reads the organisation from D1, treats the incoming subscription as redundant, avoids overwriting D1, and defensively cancels the loser on Stripe via `stripe.subscriptions.cancel(subscription.id)`.
+- **Concurrent Checkout & Duplicate Prevention:**
+  - `createSubscriptionCheckout` applies per-organisation rate limiting via the `RATE_LIMITER` Durable Object and attaches a time-bucketed deterministic idempotency key (`sub_checkout_${orgId}_${bucket}`) to `stripe.checkout.sessions.create`.
+- **Subscription Staleness & Out-of-Order Guards:**
+  - Webhook event updates (`updated` and `deleted`) verify that `subscription.id === organisation.stripeSubscriptionId` before modifying `subscriptionStatus`. Events for stale or replaced subscriptions are logged and ignored, preventing old events from regressing entitlement state.
+  - If a `customer.subscription.updated` event arrives before `customer.subscription.created` when `organisations.stripeSubscriptionId` is null, the handler establishes the subscription via the atomic CAS claim.

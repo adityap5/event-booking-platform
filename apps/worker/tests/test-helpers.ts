@@ -7,6 +7,7 @@ import m0 from '../migrations/0000_high_giant_girl.sql?raw';
 import m1 from '../migrations/0001_white_korath.sql?raw';
 import m2 from '../migrations/0002_lyrical_retro_girl.sql?raw';
 import m3 from '../migrations/0003_kind_ikaris.sql?raw';
+import m4 from '../migrations/0004_petite_tiger_shark.sql?raw';
 
 /**
  * Initializes the D1 database tables in Miniflare test environment
@@ -20,7 +21,7 @@ export async function setupTestDb(d1: D1Database): Promise<DrizzleD1Database<typ
   await d1.prepare('DROP TABLE IF EXISTS attendees;').run();
   await d1.prepare('DROP TABLE IF EXISTS organisations;').run();
 
-  const migrations = [m0, m1, m2, m3];
+  const migrations = [m0, m1, m2, m3, m4];
 
   for (const migration of migrations) {
     const statements = migration.split('--> statement-breakpoint');
@@ -32,9 +33,9 @@ export async function setupTestDb(d1: D1Database): Promise<DrizzleD1Database<typ
     }
   }
 
-  // Seed default organisations so FK constraints on events(organisation_id) pass
+  // Seed default organisations so FK constraints on events(organisation_id) pass and test orgs have active subscription
   await d1.prepare(
-    "INSERT INTO organisations (id, name, owner_id) VALUES ('test-org-1', 'Test Org 1', 'owner-1'), ('org-1', 'Org 1', 'owner-2'), ('org-A-id', 'Org A', 'owner-A'), ('org-B-id', 'Org B', 'owner-B'), ('org-cache-1', 'Org Cache 1', 'owner-C1'), ('org-cache-2', 'Org Cache 2', 'owner-C2'), ('org-fail-1', 'Org Fail 1', 'owner-F1') ON CONFLICT(id) DO NOTHING"
+    "INSERT INTO organisations (id, name, owner_id, subscription_status) VALUES ('test-org-1', 'Test Org 1', 'owner-1', 'active'), ('org-1', 'Org 1', 'owner-2', 'active'), ('org-A-id', 'Org A', 'owner-A', 'active'), ('org-B-id', 'Org B', 'owner-B', 'active'), ('org-cache-1', 'Org Cache 1', 'owner-C1', 'active'), ('org-cache-2', 'Org Cache 2', 'owner-C2', 'active'), ('org-fail-1', 'Org Fail 1', 'owner-F1', 'active') ON CONFLICT(id) DO NOTHING"
   ).run();
 
   return drizzle(d1, { schema });
@@ -58,6 +59,7 @@ export function createTestCaller(opts: TestCallerOptions): ReturnType<typeof app
     ...opts.env,
     STRIPE_SECRET_KEY: opts.env.STRIPE_SECRET_KEY || 'sk_test_mock',
     STRIPE_WEBHOOK_SECRET: opts.env.STRIPE_WEBHOOK_SECRET || 'whsec_test_secret_123',
+    STRIPE_SUBSCRIPTION_PRICE_ID: opts.env.STRIPE_SUBSCRIPTION_PRICE_ID || 'price_test_monthly_sub',
   };
 
   const ctx: Context = {

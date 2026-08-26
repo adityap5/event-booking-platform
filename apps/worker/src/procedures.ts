@@ -7,6 +7,7 @@ export interface WorkerEnv {
   CLERK_SECRET_KEY: string;
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
+  STRIPE_SUBSCRIPTION_PRICE_ID: string;
   // Public deployed URLs — sourced from wrangler.jsonc vars so a URL change
   // requires updating only wrangler.jsonc, not source files.
   WORKER_URL: string;

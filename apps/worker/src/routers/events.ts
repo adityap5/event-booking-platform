@@ -188,6 +188,27 @@ export const eventsRouter = {
       // Event creation is restricted to organisers — today this is unreachable (no invite-member feature exists yet, every org has exactly one member), but closing it now avoids it becoming a real gap the moment that feature ships.
       const orgId = requireOrganiserRole(ctx, 'organiser');
 
+      // Entitlement rule: Organisation must have an active or trialing subscription in D1.
+      // Target organisation is derived strictly from server-authenticated ctx.orgId, never client inputs.
+      const [org] = await ctx.db
+        .select({ subscriptionStatus: schema.organisations.subscriptionStatus })
+        .from(schema.organisations)
+        .where(eq(schema.organisations.id, orgId));
+
+      if (!org) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'Organisation not recognized. Please complete organiser onboarding first.',
+        });
+      }
+
+      if (org.subscriptionStatus !== 'active' && org.subscriptionStatus !== 'trialing') {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'An active subscription is required to create events. Subscribe from your dashboard.',
+        });
+      }
+
       const rateLimiter = ctx.env.RATE_LIMITER.get(ctx.env.RATE_LIMITER.idFromName(orgId));
       const { allowed } = await rateLimiter.checkLimit('createEvent', 5, 60 * 60_000);
       if (!allowed) {

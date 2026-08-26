@@ -106,9 +106,14 @@ export default function DashboardPage() {
         <div style={{ marginTop: '2rem', padding: '1.5rem', border: '1px solid #eaeaea', borderRadius: '8px' }}>
           <h2>Welcome Organiser!</h2>
           <p>Organization: {organization.name} ({orgId})</p>
-          <Link href="/events/create" style={{ display: 'inline-block', marginTop: '1rem', padding: '0.5rem 1rem', fontSize: '1rem', backgroundColor: '#0070f3', color: 'white', textDecoration: 'none', borderRadius: '4px', fontWeight: 500 }}>
-            Create Event
-          </Link>
+          <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem', flexWrap: 'wrap' }}>
+            <Link href="/events/create" style={{ display: 'inline-block', padding: '0.5rem 1rem', fontSize: '1rem', backgroundColor: '#0070f3', color: 'white', textDecoration: 'none', borderRadius: '4px', fontWeight: 500 }}>
+              Create Event
+            </Link>
+            <Link href="/dashboard/billing" style={{ display: 'inline-block', padding: '0.5rem 1rem', fontSize: '1rem', backgroundColor: '#f3f4f6', color: '#1f2937', textDecoration: 'none', borderRadius: '4px', fontWeight: 500, border: '1px solid #d1d5db' }}>
+              Billing &amp; Subscription
+            </Link>
+          </div>
         </div>
       ) : (
         // Attendee View

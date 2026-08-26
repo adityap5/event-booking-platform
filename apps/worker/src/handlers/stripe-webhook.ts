@@ -2,13 +2,14 @@ import Stripe from 'stripe';
 import { drizzle } from 'drizzle-orm/d1';
 import * as schema from '@event-booking/shared';
 import { events } from '@event-booking/shared';
-import { eq } from 'drizzle-orm';
+import { eq, and, or, isNull } from 'drizzle-orm';
 import { dispatchEmailConfirmation, dispatchCalendarInvite } from '../integrations.js';
 import { confirmBookingFromPayment } from '../booking-confirmation.js';
 import { generateTicketPdf } from '../ticket-pdf.js';
 import type { Env } from '../index.js';
 import * as Sentry from '@sentry/cloudflare';
 import { logStructured } from '../logger.js';
+import { findOrgByStripeCustomerId } from '../subscription-helpers.js';
 
 export async function handleStripeWebhook(request: Request, env: Env): Promise<Response | null> {
   const url = new URL(request.url);
@@ -339,7 +340,193 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
       return new Response('', { status: 200 });
     }
 
+    if (stripeEvent.type === 'customer.subscription.created') {
+      const subscription = stripeEvent.data.object as Stripe.Subscription;
+      const customerId = typeof subscription.customer === 'string'
+        ? subscription.customer
+        : subscription.customer?.id;
 
+      if (!customerId) {
+        console.warn('customer.subscription.created: missing customer ID on subscription object', subscription.id);
+        return new Response('', { status: 200 });
+      }
+
+      const db = drizzle(env.DB, { schema });
+      const org = await findOrgByStripeCustomerId(db, customerId);
+
+      if (!org) {
+        console.warn('customer.subscription.created: unknown stripeCustomerId', customerId);
+        return new Response('', { status: 200 });
+      }
+
+      // 1. If already authoritative for this exact subscription ID, update status idempotently
+      if (org.stripeSubscriptionId === subscription.id) {
+        await db
+          .update(schema.organisations)
+          .set({
+            subscriptionStatus: subscription.status,
+          })
+          .where(eq(schema.organisations.id, org.id));
+        return new Response('', { status: 200 });
+      }
+
+      // 2. Atomic Compare-And-Set claim:
+      // If org has no subscription ID or is canceled, attempt an atomic claim where stripeSubscriptionId is NULL
+      // or subscriptionStatus is 'canceled'.
+      if (!org.stripeSubscriptionId || org.subscriptionStatus === 'canceled') {
+        const claimResult = await db
+          .update(schema.organisations)
+          .set({
+            stripeSubscriptionId: subscription.id,
+            subscriptionStatus: subscription.status,
+          })
+          .where(
+            and(
+              eq(schema.organisations.id, org.id),
+              or(
+                isNull(schema.organisations.stripeSubscriptionId),
+                eq(schema.organisations.subscriptionStatus, 'canceled'),
+              ),
+            ),
+          )
+          .returning({ id: schema.organisations.id });
+
+        if (claimResult.length > 0) {
+          // Won the atomic claim — this subscription is now authoritative in D1
+          return new Response('', { status: 200 });
+        }
+      }
+
+      // 3. Race lost or existing non-terminal subscription already held.
+      // Re-read D1 to identify the authoritative winner.
+      const freshOrg = await findOrgByStripeCustomerId(db, customerId);
+      if (freshOrg?.stripeSubscriptionId === subscription.id) {
+        return new Response('', { status: 200 });
+      }
+
+      // Defensively cancel the redundant secondary subscription on Stripe to prevent double-billing
+      console.warn('customer.subscription.created: ignoring and canceling unexpected secondary subscription for customer', {
+        orgId: org.id,
+        authoritativeSubscriptionId: freshOrg?.stripeSubscriptionId,
+        rejectedSubscriptionId: subscription.id,
+      });
+
+      try {
+        const stripeClient = new Stripe(env.STRIPE_SECRET_KEY, {
+          httpClient: Stripe.createFetchHttpClient(),
+        });
+        await stripeClient.subscriptions.cancel(subscription.id);
+      } catch (cancelErr) {
+        console.error('Failed to cancel redundant secondary subscription on Stripe:', cancelErr);
+      }
+
+      return new Response('', { status: 200 });
+    }
+
+    if (stripeEvent.type === 'customer.subscription.updated') {
+      const subscription = stripeEvent.data.object as Stripe.Subscription;
+      const customerId = typeof subscription.customer === 'string'
+        ? subscription.customer
+        : subscription.customer?.id;
+
+      if (!customerId) {
+        console.warn('customer.subscription.updated: missing customer ID on subscription object', subscription.id);
+        return new Response('', { status: 200 });
+      }
+
+      const db = drizzle(env.DB, { schema });
+      const org = await findOrgByStripeCustomerId(db, customerId);
+
+      if (!org) {
+        console.warn('customer.subscription.updated: unknown stripeCustomerId', customerId);
+        return new Response('', { status: 200 });
+      }
+
+      // 1. Matching current subscription — update status
+      if (org.stripeSubscriptionId === subscription.id) {
+        await db
+          .update(schema.organisations)
+          .set({
+            subscriptionStatus: subscription.status,
+          })
+          .where(eq(schema.organisations.id, org.id));
+        return new Response('', { status: 200 });
+      }
+
+      // 2. Out-of-order delivery protection: If stripeSubscriptionId was null, attempt atomic claim
+      if (!org.stripeSubscriptionId) {
+        const claimResult = await db
+          .update(schema.organisations)
+          .set({
+            stripeSubscriptionId: subscription.id,
+            subscriptionStatus: subscription.status,
+          })
+          .where(
+            and(
+              eq(schema.organisations.id, org.id),
+              isNull(schema.organisations.stripeSubscriptionId),
+            ),
+          )
+          .returning({ id: schema.organisations.id });
+
+        if (claimResult.length > 0) {
+          // Won the claim and adopted the subscription
+          return new Response('', { status: 200 });
+        }
+      }
+
+      // 3. Race lost or stale event for non-matching subscription ID
+      const freshOrg = await findOrgByStripeCustomerId(db, customerId);
+      if (freshOrg?.stripeSubscriptionId === subscription.id) {
+        return new Response('', { status: 200 });
+      }
+
+      console.warn('customer.subscription.updated: ignoring stale event for non-matching subscription ID', {
+        orgId: org.id,
+        currentSubscriptionId: freshOrg?.stripeSubscriptionId,
+        eventSubscriptionId: subscription.id,
+      });
+
+      return new Response('', { status: 200 });
+    }
+
+    if (stripeEvent.type === 'customer.subscription.deleted') {
+      const subscription = stripeEvent.data.object as Stripe.Subscription;
+      const customerId = typeof subscription.customer === 'string'
+        ? subscription.customer
+        : subscription.customer?.id;
+
+      if (!customerId) {
+        console.warn('customer.subscription.deleted: missing customer ID on subscription object', subscription.id);
+        return new Response('', { status: 200 });
+      }
+
+      const db = drizzle(env.DB, { schema });
+      const org = await findOrgByStripeCustomerId(db, customerId);
+
+      if (!org) {
+        console.warn('customer.subscription.deleted: unknown stripeCustomerId', customerId);
+        return new Response('', { status: 200 });
+      }
+
+      // Only transition to canceled if the deleted subscription matches the current subscription ID
+      if (org.stripeSubscriptionId === subscription.id) {
+        await db
+          .update(schema.organisations)
+          .set({
+            subscriptionStatus: 'canceled',
+          })
+          .where(eq(schema.organisations.id, org.id));
+      } else {
+        console.warn('customer.subscription.deleted: ignoring stale deletion for non-matching subscription ID', {
+          orgId: org.id,
+          currentSubscriptionId: org.stripeSubscriptionId,
+          eventSubscriptionId: subscription.id,
+        });
+      }
+
+      return new Response('', { status: 200 });
+    }
 
     // Acknowledge and ignore all other event types
     return new Response('', { status: 200 });

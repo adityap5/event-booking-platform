@@ -161,3 +161,61 @@
   opacity: 0.55;
   cursor: not-allowed;
 }
+
+/* ---- Subscription Gating State ---- */
+
+.subscriptionCard {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 2rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  margin-top: 1rem;
+}
+
+.subscriptionWarning {
+  background-color: #fffbeb;
+  border: 1px solid #fde68a;
+  color: #92400e;
+  padding: 1rem 1.25rem;
+  border-radius: 8px;
+  margin-bottom: 1.5rem;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.subscriptionActions {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  margin-top: 1.5rem;
+}
+
+.subscriptionButton {
+  display: inline-block;
+  background-color: #0070f3;
+  color: #ffffff;
+  text-decoration: none;
+  padding: 0.75rem 1.5rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  border-radius: 8px;
+  transition: background-color 0.15s ease;
+}
+
+.subscriptionButton:hover {
+  background-color: #0051b3;
+}
+
+.subscriptionSecondaryLink {
+  display: inline-block;
+  color: #4b5563;
+  text-decoration: none;
+  font-size: 0.95rem;
+  font-weight: 500;
+  padding: 0.75rem 1rem;
+}
+
+.subscriptionSecondaryLink:hover {
+  color: #111827;
+}
