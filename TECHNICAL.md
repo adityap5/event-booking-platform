@@ -147,6 +147,16 @@ Hibernation-capable WebSockets are used throughout (`this.ctx.acceptWebSocket()`
 | `RATE_LIMITER` | Durable Object (`RateLimiter`) | Atomic per-key rate limiting (see §7) |
 | `EVENT_CACHE` | KV | Caches the public event payload (name/date/price/image), 5-minute TTL |
 | `EVENT_COVERS` | R2 | Event cover images — both temp uploads and finalised event covers |
+| `EVENT_TICKETS` | R2 | Private bucket for generated PDF tickets — access gated by authenticated `getTicket` |
+
+### Worker variables (`apps/worker/wrangler.jsonc` `vars`)
+
+Public non-secret configuration variables used to construct absolute URLs without hardcoding hostnames in source code:
+
+| Variable | Where used | Notes |
+|---|---|---|
+| `WORKER_URL` | worker | Deployed worker public URL — used for building absolute image URLs (`/images/events/...`) |
+| `WEB_APP_URL` | worker | Deployed web application URL — used for Stripe Checkout and Billing redirect URLs (`success_url`, `cancel_url`, `return_url`) |
 
 ### Web-app bindings (`apps/web-app/wrangler.jsonc`)
 
@@ -164,8 +174,10 @@ Never committed. Local: `.dev.vars` (gitignored). Deployed: `wrangler secret put
 | `CLERK_JWT_KEY` | worker | Clerk's *public* JWT key — networkless JWT signature verification, no per-request Clerk API call |
 | `CLERK_SECRET_KEY` | worker | Clerk's secret key — used only when resolving a real name/email for a newly-created attendee (`ensureAttendee`), via `clerkClient.users.getUser()` |
 | `CLERK_WEBHOOK_SECRET` | worker | Verifies the `organization.created` webhook signature (svix) |
-| `STRIPE_SECRET_KEY` | worker | Stripe Checkout session creation |
-| `STRIPE_WEBHOOK_SECRET` | worker | Verifies Stripe webhook signatures (`constructEventAsync`) |
+| `STRIPE_SECRET_KEY` | worker | Stripe API secret key for Checkout Sessions, Customer creation, Refunds, and Billing Portal |
+| `STRIPE_WEBHOOK_SECRET` | worker | Verifies Stripe webhook signatures (`constructEventAsync`) for payment and subscription events |
+| `STRIPE_SUBSCRIPTION_PRICE_ID` | worker | Stripe recurring price ID for organiser monthly subscription (`createSubscriptionCheckout`) |
+| `SENTRY_DSN` | worker | Sentry Data Source Name for error and exception monitoring across worker handlers and Durable Objects |
 
 **To add a new secret:** add it to the relevant `Env` type (`apps/worker/src/index.ts` or wherever it's consumed), set it locally in `.dev.vars`, and deploy it with `wrangler secret put <NAME>` from the correct app directory. It will not appear in `wrangler.jsonc` — secrets are never listed there.
 
@@ -179,42 +191,68 @@ D1, via Drizzle (`packages/shared/src/schema.ts`), migrations always generated v
 organisations
   id (uuid, pk)
   name
-  ownerId          — Clerk userId of the creating user
+  ownerId                — Clerk userId of the creating user (unique index)
+  stripeCustomerId       — Stripe Customer ID for subscriptions & billing (unique index, nullable)
+  stripeSubscriptionId   — Authoritative Stripe Subscription ID (nullable)
+  subscriptionStatus     — text (default: 'inactive'; values: 'inactive' | 'active' | 'trialing' | 'past_due' | 'canceled')
   createdAt
 
 events
   id (uuid, pk)
-  organisationId   — FK → organisations.id, cascade delete
+  organisationId         — FK → organisations.id, cascade delete (indexed)
   name
-  description      — nullable
-  date             — integer, timestamp mode (full date+time, seconds precision)
+  description            — nullable
+  date                   — integer, timestamp mode (seconds precision, indexed)
   totalSeats
-  pricePerSeat     — integer, smallest currency unit (pence), never floats
-  coverImageUrl    — nullable, full public /images/... URL
+  pricePerSeat           — integer, smallest currency unit (pence), never floats
+  coverImageUrl          — nullable, full public /images/... URL
   createdAt
 
 attendees
   id (uuid, pk)
-  userId           — Clerk userId, unique
+  userId                 — Clerk userId (unique index)
   email
   name
 
 bookings
   id (uuid, pk)
-  eventId          — FK → events.id, cascade delete
-  attendeeId       — FK → attendees.id, cascade delete
-  status           — enum: pending | confirmed | cancelled
-  holdId           — nullable (pre-hold-system rows have none)
+  eventId                — FK → events.id, cascade delete (indexed)
+  attendeeId             — FK → attendees.id, cascade delete (indexed)
+  status                 — enum: pending | confirmed | cancelled | refunded
+  holdId                 — nullable, indexed (pre-hold-system rows have none)
   seatCount
-  stripePaymentIntentId — nullable
+  stripePaymentIntentId  — nullable
   createdAt
+
+audit_log
+  id (uuid, pk)
+  eventType              — text, indexed (e.g. booking_confirmed, booking_refunded, hold_released_explicit, reconciliation_orphan_detected)
+  holdId                 — nullable
+  bookingEventId         — nullable, indexed
+  userId                 — nullable
+  orgId                  — nullable
+  detail                 — nullable text (JSON string containing structured operational detail)
+  createdAt
+
+organisation_api_keys
+  id (uuid, pk)
+  organisationId         — FK → organisations.id, cascade delete (indexed)
+  keyHash                — text, SHA-256 hash of the plaintext API key (unique index)
+  keyPrefix              — text (e.g. 'eb_live_a1b2c3d4' for display/identification)
+  createdAt
+  revokedAt              — nullable timestamp (partial unique index on organisationId WHERE revoked_at IS NULL structurally enforces at most one active key per org)
 ```
 
-**DO/D1 boundary for seat state:** D1's `bookings` table is the durable record of what was actually paid for and confirmed. The DO's own SQLite `reservations` table is the live, serialised source of truth for "is this seat available right now" — it exists only inside the DO instance for that event, is not queried directly by any other part of the system, and a pending hold in the DO does not yet have a corresponding bookings row in D1 (that row is only written by confirmBookingFromPayment, called exclusively from the Stripe webhook — see §2a). There is no client-triggered confirm path; confirmation happens server-side only, driven by a verified Stripe payment event.
+**DO/D1 boundary for seat state:** D1's `bookings` table is the durable record of what was actually paid for and confirmed. The DO's own SQLite `reservations` table is the live, serialised source of truth for "is this seat available right now" — it exists only inside the DO instance for that event, is not queried directly by any other part of the system, and a pending hold in the DO does not yet have a corresponding bookings row in D1 (that row is only written by `confirmBookingFromPayment`, called exclusively from the Stripe webhook — see §2a). There is no client-triggered confirm path; confirmation happens server-side only, driven by a verified Stripe payment event.
+
+**DO Internal Storage Tables (SQLite):**
+- `event_state` (`id INTEGER PRIMARY KEY, total_seats INTEGER, initialized INTEGER`): Single row storing total event capacity.
+- `reservations` (`id TEXT PRIMARY KEY, user_id TEXT, seat_count INTEGER, expires_at INTEGER, status TEXT`): Holds active (`pending`, `confirmed`) and terminal (`released`, `refunded`) reservation rows.
+- `socket_tickets` (`ticket TEXT PRIMARY KEY, user_id TEXT, org_id TEXT, event_id TEXT, expires_at INTEGER`): Ephemeral single-use tickets for WebSocket connection authentication (30-second TTL).
 
 **IDs are not enumerable.** Every primary key is a `crypto.randomUUID()`, not a sequential integer — a user cannot walk the dataset by incrementing a URL parameter.
 
-All createdAt and date columns use mode: 'timestamp' (seconds), paired with strftime('%s', 'now') defaults (also seconds) — verified against drizzle-orm's actual source, not just assumed. See §12's follow-up pass for how this was confirmed." Skip this one if that section already documents the seconds convention clearly — it'd be redundant.
+All `createdAt` and `date` columns use `mode: 'timestamp'` (seconds), paired with `sql\`(strftime('%s', 'now'))\`` defaults (also seconds) — verified against drizzle-orm's actual source.
 
 ---
 
@@ -226,6 +264,8 @@ The public event page (`getPublicEvent`) caches static metadata (name, descripti
 
 This is the general principle applied throughout: **KV is a cache, not a lock, and not a source of truth for anything that changes faster than its TTL.**
 
+**Note on `listPublicEvents`:** The public catalog endpoint does not use KV caching. It queries D1 directly, ensuring newly published events appear immediately in the feed.
+
 ---
 
 ## 7. Rate Limiting
@@ -236,12 +276,17 @@ KV has no atomic increment. Two simultaneous requests can both read `count = 9`,
 
 **What we use: a dedicated `RateLimiter` Durable Object**, keyed by `idFromName(<key>)`, exposing `checkLimit(action, limit, windowMs)`. Because the DO is single-threaded, `checkLimit` is genuinely atomic — no bypass under concurrent load.
 
-Two rate limits are enforced today:
+Rate limits enforced via `RateLimiter`:
 
-| Action | Key | Limit |
-|---|---|---|
-| `reserveSeat` | `userId` | 10 per 60 seconds — per-attendee, booking-abuse concern |
-| `createEvent` | `orgId` | 5 per hour — per-organisation (all members of an org share one quota, since event-creation abuse is an org-level concern, not an individual-teammate one) |
+| Action | Key | Limit | Notes |
+|---|---|---|---|
+| `reserveSeat` | `userId` | 10 per 60s | Per-attendee booking-abuse concern |
+| `createEvent` | `orgId` | 5 per hour | Per-organisation (all members of an org share one quota) |
+| `createCheckoutSession` | `userId` | 10 per 60s | Prevents Stripe Checkout session spam |
+| `createSocketTicket` | `userId` | 10 per 60s | Prevents Durable Object WebSocket connection exhaustion |
+| `uploadEventCover` | `userId` | 5 per 60s | Tighter bounds for R2 write operations |
+| `publicRead` | IP (`CF-Connecting-IP`) | 60 per 60s | Shared bucket for all public read queries (`listPublicEvents`, `getPublicEvent`, `getAvailableSeats`) |
+| `publicImageRead` | IP (`CF-Connecting-IP`) | 120 per 60s | Higher capacity for public `/images/*` loading (often bulk-fetched) |
 
 Rate limiting is a separate DO class (`RateLimiter`) from `SeatLedger`, not folded into the seat DO — it's a cross-cutting concern with a different lifecycle (per-user or per-org, not per-event).
 
@@ -344,6 +389,7 @@ This required a chain of supporting fixes, each worth knowing about if touching 
 - **`apps/worker/src/router.ts` and `index.ts` have been split into `routers/`, `handlers/`, and `procedures.ts`; `seat-ledger.ts` and the web-app have not yet received the same treatment** — see `ROADMAP.md`.
 - **User-facing hold release (`releaseHold`):** Implemented via an ownership-checked `releaseHold` tRPC procedure, wired to `booking/cancelled.tsx` on Stripe checkout abandonment and to the "Release previous hold & retry" flow in `pages/events/[id].tsx` when a user encounters `TOO_MANY_PENDING_HOLDS`.
 - **`getPublicEvent`'s cached metadata is never invalidated on event update.** The 5-minute KV cache described in §6 had exactly one invalidation path, `invalidateEventCache` — never called anywhere in the frontend, confirmed by grep before it was removed as dead code alongside `whoami`/`getEvent`/etc. on Day 1 Phase 2. Net effect, present since before that cleanup: editing an event's name/description/price does not update what public visitors see for up to 5 minutes; the cleanup didn't introduce this, it just removed the never-used procedure that was theoretically supposed to prevent it. Fix: whichever mutation updates an event row should call `ctx.env.EVENT_CACHE.delete(...)` inline, immediately after the D1 write succeeds — not via a separately exposed procedure the frontend has to remember to call.
+- **Pagination Limits vs CPU Execution Time:** `listPublicEvents` enforces a hard `MAX_OFFSET = 10000`. Cloudflare D1/SQLite offset pagination performs an index scan, and excessively deep offsets (e.g., 500k) consume too much CPU time under the Workers 50ms subrequest budget. This protects the runtime but restricts pagination depth. If datasets grow extremely large, this must be refactored to use cursor-based pagination.
 
 ## 11. Test Suite (Day 2, Phase 2)
 
@@ -370,6 +416,33 @@ This required a chain of supporting fixes, each worth knowing about if touching 
 
 - `test-seat-engine.sh` (the previous bash-based smoke test, sequential, hitting the deployed worker directly) has been deleted — this suite replaces it.
 
+### Test Files and Feature Coverage (244 tests total)
+
+| File | Tests | Feature Covered |
+|---|---|---|
+| `api-keys.test.ts` | 20 | Public API key issuance, revocation, middleware validation, offset pagination |
+| `body-size-limit.test.ts` | 6 | 100KB payload limit enforcement (`Content-Length` and streaming boundaries) |
+| `booking-confirmation.test.ts` | 8 | DO `confirmSeat`, idempotency, orphan hold detection, mismatched amounts |
+| `cache-control.test.ts` | 6 | `Cache-Control: no-store` header behavior on tRPC vs R2 image routes |
+| `clerk-webhook.test.ts` | 2 | `organization.created` webhooks, SVIX signatures, owner conflict handling |
+| `error-formatter.test.ts` | 2 | tRPC error serialization and internal message masking |
+| `events.test.ts` | 24 | `reserveSeat` concurrency, hold releasing, event creation, permission boundaries |
+| `get-ticket.test.ts` | 13 | Authenticated fetching of PDF tickets for confirmed bookings |
+| `payments.test.ts` | 7 | Stripe `createCheckoutSession` payload assertions, query params, rate limiting |
+| `public-rate-limiting.test.ts` | 3 | IP-based rate limiting on public endpoints (`listPublicEvents` etc.) |
+| `rate-limiter.test.ts` | 4 | `RateLimiter` Durable Object atomic limits and window rollovers |
+| `realtime.test.ts` | 2 | `createSocketTicket` minting, org membership enforcement, rate limiting |
+| `reconciliation.test.ts` | 15 | Nightly CRON reconciliation, orphan DO hold detection, and Sentry/Axiom logging |
+| `refund-booking.test.ts` | 18 | `refundBooking`, Stripe API calls, terminal DO transitions, permission checks |
+| `seat-ledger.test.ts` | 22 | Durable Object core: isolation, alarm-based expiry, single-threaded locks |
+| `security-headers.test.ts` | 10 | CSP, HSTS, `nosniff`, `Referrer-Policy` across APIs, R2 images, and WebSockets |
+| `sentry.test.ts` | 9 | Sentry error capture formatting, request tagging, unhandled error catching |
+| `stripe-webhook.test.ts` | 7 | Webhook HMAC-SHA256 signature verification, Stripe event routing |
+| `structured-logging.test.ts` | 11 | Axiom JSON logging format and audit log schema validation |
+| `subscriptions.test.ts` | 29 | Stripe Billing portal, subscription state syncing (`active`, `past_due`, `canceled`) |
+| `ticket-pdf.test.ts` | 8 | PDF generation magic byte validation and dummy layout rendering |
+| `upload.test.ts` | 12 | Event cover uploads, R2 binding, magic byte (JPEG/PNG/WebP) checks, rate limits |
+| `websocket-e2e.test.ts` | 6 | Full 101 WebSocket upgrades, CSWSH CORS defense, single-use ticket consumption |
 
 ## 12. Security Sweep Fixes (Day 3, Phase 2)
 
