@@ -166,3 +166,336 @@ email/calendar never dispatched; looks healthy
 **How to avoid it**
 
 Wrap every audit-log write in its own `try/catch`. On failure: log to console, capture to your error tracker at `warning` level with relevant IDs in context, and continue — do not let it affect the caller's return value. An audit record is observability infrastructure; it must never be the reason a business-critical operation fails or silently skips downstream steps. Match the swallow-and-continue pattern already used for integration dispatch at the same call site.
+
+---
+
+## 7. Authorization must run before any state disclosure, not after
+
+**What it looks like**
+
+An endpoint fetches a resource, evaluates an internal lifecycle or status condition, and returns an early error before verifying whether the caller is authorized to view or mutate the resource.
+
+```ts
+// vulnerable (the getTicket incident): status check runs before ownership check
+const [booking] = await db.select().from(bookings).where(eq(bookings.id, input.bookingId));
+if (!booking) throw new TRPCError({ code: 'NOT_FOUND', message: 'Booking not found' });
+
+if (booking.status !== 'confirmed') {
+  throw new TRPCError({ code: 'NOT_FOUND', message: 'No ticket available' });
+}
+
+if (booking.userId !== ctx.userId && !isOrgAdmin(ctx, booking.orgId)) {
+  throw new TRPCError({ code: 'FORBIDDEN' });
+}
+```
+
+In the vulnerable pattern, an unauthorized caller probing random UUIDs receives `NOT_FOUND` ("No ticket available") if the booking is pending or cancelled, but receives `FORBIDDEN` if the booking is confirmed. The status check acts as an oracle, leaking internal business state to unauthorized parties.
+
+```ts
+// safe (apps/worker/src/routers/tickets.ts:53-94): authorization precedes all status guards
+const [booking] = await db.select().from(bookings).where(eq(bookings.id, input.bookingId));
+if (!booking) throw new TRPCError({ code: 'NOT_FOUND', message: 'Booking not found' });
+
+// 1. Authorization runs first
+const isOwnAttendee = ctx.userId === booking.attendeeUserId;
+if (!isOwnAttendee && !isAuthorizedOrganiser(ctx, booking.eventOrgId)) {
+  throw new TRPCError({ code: 'FORBIDDEN', message: 'You do not have permission to access this ticket.' });
+}
+
+// 2. Status guard runs only after authorization has passed
+if (booking.status !== 'confirmed') {
+  throw new TRPCError({ code: 'NOT_FOUND', message: 'No ticket available for this booking' });
+}
+```
+
+**How to spot it**
+
+- Inspect every endpoint that returns different HTTP status codes or error messages for different resource states (`pending`, `confirmed`, `cancelled`, `archived`).
+- Check whether any branching, filtering, or early-return statement executes between the initial DB select and the caller identity/role check.
+
+**How to avoid it**
+
+Any check that can return a *different* response depending on a resource's internal state must not run until authorization has already passed. Structure procedures so that authorization is asserted immediately after record retrieval (or folded into the query itself). An unauthorized caller must receive `FORBIDDEN` uniformly, regardless of resource status.
+
+---
+
+## 8. Cross-boundary `Response` header immutability
+
+**What it looks like**
+
+A handler receives a `Response` object returned from a Durable Object RPC stub (`stub.fetch()`) or a Cloudflare Service Binding, and attempts to append or modify headers in place using `response.headers.set(...)`.
+
+```ts
+// throws TypeError: Can't modify immutable headers
+export async function applySecurityHeaders(response: Response): Promise<Response> {
+  response.headers.set('X-Content-Type-Options', 'nosniff'); // FAILS on DO/Service-Binding responses
+  return response;
+}
+```
+
+In the Cloudflare Workers runtime, a `Response` object's headers become strictly immutable once the response crosses an RPC or stub boundary — even if the DO constructed that response locally with `new Response(...)`. Mutating in place works for locally constructed responses within the current isolate, but throws an uncaught `TypeError` for cross-boundary responses (such as DO error responses or WebSocket handshakes), turning intentional responses into unexpected `500` errors.
+
+**How to spot it**
+
+- Search for `.headers.set(`, `.headers.append(`, or `.headers.delete(` called on `Response` variables that originate from `stub.fetch()`, `env.BINDING.fetch()`, or helper functions that accept arbitrary `Response` instances.
+- Test error paths on DO-proxied routes (e.g. passing missing parameters to a DO endpoint) and check if runtime header mutation throws.
+
+**How to avoid it**
+
+Never mutate `Response.headers` in place if the response could originate from a DO or service binding. Always reconstruct a new `Response` object with cloned headers (`apps/worker/src/cors.ts:20-30`):
+
+```ts
+export function applyWorkerSecurityHeaders(response: Response): Response {
+  const headers = new Headers(response.headers);
+  headers.set('X-Content-Type-Options', 'nosniff');
+  headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  headers.set('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+  headers.set('Content-Security-Policy', "frame-ancestors 'none'");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+```
+
+---
+
+## 9. Blind revocations race under concurrency — use Compare-and-Swap (CAS)
+
+**What it looks like**
+
+A mutation revokes or replaces an active resource by executing an unconditional "revoke whatever is currently active" write, followed by creating the new state.
+
+```ts
+// vulnerable: concurrent callers race on unconditional revocation
+await db.update(apiKeys).set({ revokedAt: now }).where(and(eq(apiKeys.orgId, orgId), isNull(apiKeys.revokedAt)));
+await db.insert(apiKeys).values({ id: newKeyId, orgId, ... });
+return { rawKey };
+```
+
+Under concurrency, two callers (A and B) rotating an API key or updating a subscription will interleave:
+1. Caller A revokes Key 0 and inserts Key 1.
+2. Caller B revokes Key 1 (unconditionally revoking whatever is active) and inserts Key 2.
+3. Caller A returns Key 1 to the user — but Key 1 was already killed by Caller B. Caller A received an already-dead key with no error.
+Similarly, in async subscription webhooks, an out-of-order `customer.subscription.updated` event could overwrite a newer active subscription if it updates unconditionally without verifying that the existing DB row matches the specific subscription ID being updated.
+
+**How to spot it**
+
+- Search for `UPDATE ... WHERE ... AND is_active = true` or `WHERE revoked_at IS NULL` without scoping to a specifically observed primary key / row version.
+- Trace concurrent execution of rotation, replacement, and out-of-order webhook handlers.
+
+**How to avoid it**
+
+Implement optimistic Compare-and-Swap (CAS):
+1. Read the specific row and ID you expect to be active (`activeKey.id` or `org.stripeSubscriptionId`).
+2. Condition the update on that exact ID (`WHERE id = :observedId AND revoked_at IS NULL`).
+3. Combine revocation and insertion in an atomic batch (`db.batch([revokeStmt, insertStmt])`) backed by a partial unique index (`WHERE revoked_at IS NULL`), or verify affected rows via `.returning()`.
+4. If 0 rows were updated, treat the race as lost: abort cleanly, throw a `CONFLICT` error (as in `apps/worker/src/services/api-key-service.ts:164-230`), or defensively cancel redundant external entities (as in `apps/worker/src/handlers/stripe-webhook.ts:373-424`).
+
+---
+
+## 10. WebSocket upgrades bypass CORS — validate Origin explicitly
+
+**What it looks like**
+
+A WebSocket upgrade endpoint relies solely on CORS middleware or assumes cross-origin requests are blocked automatically by the browser.
+
+```ts
+// vulnerable: WebSocket handshake does not validate Origin
+if (url.pathname === '/ws' && request.headers.get('Upgrade') === 'websocket') {
+  const stub = env.SEAT_LEDGER.get(id);
+  return stub.fetch(request);
+}
+```
+
+The browser WebSocket API does not execute CORS preflights and does not adhere to standard Same-Origin Policy fetch restrictions. Ticket-based auth provides only *incidental* protection because browsers do not attach custom `Authorization: Bearer` headers cross-origin. If authentication ever migrates to ambient credentials (session cookies or HTTP auth), malicious third-party websites could initiate Cross-Site WebSocket Hijacking (CSWSH) against logged-in users.
+
+**How to spot it**
+
+- Check all HTTP handlers handling `Upgrade: websocket`. Verify whether `request.headers.get('Origin')` is validated.
+- Test if a browser-originated request with `Origin: https://evil.com` can successfully negotiate a WebSocket connection.
+
+**How to avoid it**
+
+Explicitly validate the `Origin` header against a trusted allowlist during the upgrade handshake (`apps/worker/src/handlers/websocket.ts:7-26`):
+
+```ts
+const origin = request.headers.get('Origin');
+// Reject browser requests from unauthorized origins
+if (origin !== null && !CORS_ALLOWED_ORIGINS.includes(origin)) {
+  return new Response('Invalid origin', { status: 403 });
+}
+```
+
+*Note on non-browser clients:* Browsers unforgeably attach the `Origin` header. Non-browser clients (automated integration tests, monitoring probes, CLI tools) often omit `Origin`. Permitting `origin === null` preserves tooling interoperability while strictly enforcing the allowlist for all browser-originated connections.
+
+---
+
+## 11. Permissive CORS (`*`) is only safe with explicit per-request credentials
+
+**What it looks like**
+
+Applying `Access-Control-Allow-Origin: *` to an endpoint that relies on ambient credentials (cookies, session state, IP allowlists), or conversely, assuming `*` is automatically a vulnerability on public APIs.
+
+```ts
+// DANGEROUS: Wildcard CORS with ambient cookie-based authentication
+app.use('/api/*', cors({ origin: '*' }));
+app.get('/api/user/private-data', (req) => {
+  const session = req.cookies.session; // EXPLOITABLE via CSRF / cross-origin data read
+});
+
+// SAFE: Wildcard CORS on headless API with explicit Bearer token authentication
+// (apps/worker/src/handlers/public-api.ts:11-26, 60-70)
+const PUBLIC_API_CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+};
+```
+
+**How to spot it**
+
+- Review all routes returning `Access-Control-Allow-Origin: *`.
+- Check if the route reads `Cookie`, session headers, or ambient auth. If it does, any malicious site visited by an authenticated user can read private data.
+- Check if public headless endpoints (e.g. `/api/v1/events`) have explicit documentation stating why `*` is permissible.
+
+**How to avoid it**
+
+- Never use `Access-Control-Allow-Origin: *` on endpoints that read cookies, session credentials, or ambient state.
+- Permissive CORS (`*`) is valid *only* on headless, read-only public APIs where authentication is established via an explicit per-request Bearer token (`Authorization: Bearer <key>`) checked server-side.
+- Document this security model explicitly at the route definition so future code reviewers do not misclassify the intentional wildcard header as a regression.
+
+---
+
+## 12. Cross-tenant existence oracles: structure queries to prevent leaks
+
+**What it looks like**
+
+An endpoint checks if a resource exists in the database first, and then checks if the resource belongs to the caller's organisation in a separate second step.
+
+```ts
+// vulnerable: two-step existence then ownership check
+const [event] = await db.select().from(events).where(eq(events.id, input.eventId));
+if (!event) {
+  return jsonResponse({ error: 'Not Found' }, 404); // Event does not exist anywhere
+}
+if (event.organisationId !== auth.organisationId) {
+  return jsonResponse({ error: 'Forbidden' }, 403); // Leaks: event exists, but belongs to another org!
+}
+```
+
+A two-step check allows attackers to enumerate IDs and determine whether private resources belonging to competitor organisations exist on the platform.
+
+**How to spot it**
+
+- Look for sequential `WHERE id = ?` queries followed by manual `if (row.orgId !== ctx.orgId)` branching.
+- Test whether requesting a valid ID belonging to Org B using Org A's credentials returns a different status code (`403`) than requesting a non-existent ID (`404`).
+
+**How to avoid it**
+
+Structure the database query so that cross-tenant isolation is enforced at the SQL level. Query by both resource ID and organisation ID simultaneously (`apps/worker/src/services/public-events-service.ts` and `apps/worker/src/handlers/public-api.ts:110-123`):
+
+```ts
+const [event] = await db
+  .select()
+  .from(events)
+  .where(and(eq(events.id, eventId), eq(events.organisationId, orgId)));
+
+if (!event) {
+  // Structurally uniform: 404 returned identically for non-existent and other-org events
+  return jsonResponse({ error: 'Not Found' }, 404);
+}
+```
+
+Because the query itself filters on `organisationId`, there is no divergence possible in application logic.
+
+---
+
+## 13. High-entropy API keys: SHA-256 lookup and reveal-once lifecycle
+
+**What it looks like**
+
+Storing plaintext API keys in the database, using slow password hashing (bcrypt/argon2) on high-entropy tokens, or returning raw API keys in list/info responses.
+
+```ts
+// vulnerable: storing raw API key in database
+await db.insert(apiKeys).values({ id, rawKey: input.key, orgId });
+
+// inefficient / problematic in edge workers: bcrypt on 256-bit entropy secrets
+const hash = await bcrypt.hash(rawKey, 10); // Wastes edge CPU; unnecessary for high-entropy secrets
+```
+
+**How to spot it**
+
+- Grep for API key schema definitions; check if columns contain raw tokens or hashes.
+- Inspect read endpoints (`getApiKeyInfo`, `listApiKeys`) to verify they return only redacted prefixes (`evbk_a1b2c3d4...`) rather than full keys or hashes.
+- Verify whether the key generation routine uses cryptographically secure random number generators (`crypto.getRandomValues`).
+
+**How to avoid it**
+
+1. **Entropy:** Generate API keys with 256 bits of true cryptographic entropy (`crypto.getRandomValues(new Uint8Array(32))`) prefixed with an identifiable namespace (e.g. `evbk_` in `apps/worker/src/services/api-key-service.ts:14-21`).
+2. **Fast Hashing:** For high-entropy secrets ($2^{256}$ search space), slow password hashes (bcrypt/argon2) designed for low-entropy human passwords are unnecessary and waste edge CPU. Compute a standard SHA-256 digest (`crypto.subtle.digest('SHA-256', ...)`) and perform fast indexed lookups (`WHERE key_hash = :hash`).
+3. **Reveal-Once:** Return the raw key string in the HTTP response **exactly once** upon initial generation or rotation. Never store the raw key in databases, logs, or browser storage. All subsequent queries must return only the non-sensitive prefix and creation timestamp.
+
+---
+
+## 14. Column defaults vs. redundant migrations and SQLite enum realities
+
+**What it looks like**
+
+Writing complex manual data-backfill scripts for schema migrations that add columns with default values, or conversely, assuming a Drizzle enum modification requires an `ALTER TABLE` migration on SQLite.
+
+```ts
+// Example: Adding subscription_status with default 'inactive'
+export const organisations = sqliteTable('organisations', {
+  // ...
+  subscriptionStatus: text('subscription_status', {
+    enum: ['inactive', 'active', 'past_due', 'canceled', 'trialing'],
+  }).notNull().default('inactive'),
+});
+```
+
+**How to spot it**
+
+- Review migration files generated by `drizzle-kit generate`. Check the raw generated SQL before writing manual backfill scripts.
+- Check whether an `ALTER TABLE ADD COLUMN ... DEFAULT 'inactive'` is produced. SQLite automatically populates existing rows with the schema default during the migration.
+- Check if enum changes alter SQLite constraints. SQLite `text` columns do not enforce enum constraints at the database level unless explicitly configured with `CHECK` constraints. Drizzle's `{ enum: [...] }` parameter is enforced at the TypeScript compilation layer, producing no SQLite schema modification on enum widening.
+
+**How to avoid it**
+
+- Always inspect the generated `.sql` migration file. If a column has a schema-level `DEFAULT`, SQLite backfills all existing rows automatically at migration execution time; manual `UPDATE` scripts are redundant.
+- Understand SQLite type affinity: widening a TypeScript Drizzle enum produces zero SQL changes on SQLite. Verify the migration diff rather than blindly writing migration operations.
+
+---
+
+## 15. Every "unexpected" async handler branch needs deliberate alerting severity
+
+**What it looks like**
+
+An asynchronous event handler or webhook encounters an abnormal state branch, logs a generic message, returns `200`, but omits error tracking (e.g. Sentry), leaving critical invariant violations unmonitored.
+
+```ts
+// Example in apps/worker/src/handlers/stripe-webhook.ts:85-101:
+case 'hold_expired':
+  console.warn('payment_intent.succeeded: HOLD_EXPIRED — releasing hold', { holdId, eventId });
+  await db.insert(schema.auditLog).values({ eventType: 'hold_released_explicit', ... });
+  return new Response('', { status: 200 }); // Money collected, no seat given, NO Sentry alert!
+```
+
+In the `hold_expired` case, a customer paid Stripe after the 15-minute reservation hold expired. The payment succeeded, but the seat was already released back to inventory and cannot be confirmed. The handler records an audit log and returns `200` to acknowledge Stripe, but triggers **zero** Sentry alerts. In contrast, the structurally similar `orphaned_hold` case (lines 121-144) correctly alerts Sentry at `error` level.
+
+> [!WARNING]
+> **Currently Open Item in Codebase:** The `hold_expired` branch in `apps/worker/src/handlers/stripe-webhook.ts` represents a real monetary/state discrepancy (customer charged without receiving a booking) that currently lacks automated Sentry alerting and automated refund processing.
+
+**How to spot it**
+
+- Review every branch of `switch` statements and error handlers in webhook consumers (`stripe-webhook.ts`, `clerk-webhook.ts`, `reconciliation.ts`).
+- For every branch where money, seat allocation, or tenant entitlement deviates from normal flow, check if `Sentry.captureMessage` / `Sentry.captureException` is called with the appropriate severity (`warning` or `error`).
+
+**How to avoid it**
+
+Classify every non-standard branch with a deliberate alerting policy:
+- *Benign expected races* (e.g. duplicate webhook retries, already confirmed holds): log at `info`/`warn`, return `200`, no Sentry noise.
+- *Operational anomalies* (e.g. missing optional metadata): log at `warn`, capture Sentry message at `warning`.
+- *Inconsistencies & Financial Desyncs* (e.g. `orphaned_hold`, `hold_expired`, `amount_mismatch`): log at `error`, capture Sentry event at `error` level with full identifiers in context, and alert operations for manual reconciliation or automated refunding.
