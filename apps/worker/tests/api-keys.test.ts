@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { SELF, env } from 'cloudflare:test';
 import type { Env } from '../src/index.js';
 import { setupTestDb, createTestCaller } from './test-helpers.js';
-import { hashApiKey, API_KEY_PREFIX, createOrRotateApiKey } from '../src/services/api-key-service.js';
+import { hashApiKey, API_KEY_PREFIX, generateApiKey } from '../src/services/api-key-service.js';
 import { events, organisationApiKeys } from '@event-booking/shared';
 import { eq, and, isNull } from 'drizzle-orm';
 import { TRPCError } from '@trpc/server';
@@ -29,6 +29,8 @@ describe('API Key Lifecycle & Public Read-Only API', () => {
       expect(res.rawKey).toBeDefined();
       expect(res.rawKey.startsWith(API_KEY_PREFIX)).toBe(true);
       expect(res.keyPrefix).toBeDefined();
+      expect(res.keyPrefix.startsWith(API_KEY_PREFIX)).toBe(true);
+      expect(res.keyPrefix.endsWith('...')).toBe(true);
       expect(res.createdAt).toBeTypeOf('number');
 
       // Assert directly against D1 database row
@@ -184,7 +186,7 @@ describe('API Key Lifecycle & Public Read-Only API', () => {
       await expect(noOrgCaller.getApiKeyInfo()).rejects.toThrow(TRPCError);
     });
 
-    it('handles concurrent generate/rotate operations for the same organisation with exactly one active key remaining', async () => {
+    it('rotateApiKey rejects with CONFLICT if no active key exists', async () => {
       const db = await setupTestDb(workerEnv.DB);
       const caller = createTestCaller({
         env: workerEnv,
@@ -194,28 +196,58 @@ describe('API Key Lifecycle & Public Read-Only API', () => {
         role: 'organiser',
       });
 
-      // Run multiple simultaneous createOrRotateApiKey calls via tRPC procedures
+      // Attempting to rotate when no active key exists must fail with CONFLICT
+      await expect(caller.rotateApiKey()).rejects.toThrow(
+        expect.objectContaining({
+          code: 'CONFLICT',
+          message: expect.stringContaining('No active API key exists'),
+        }),
+      );
+    });
+
+    it('generateApiKey rejects with CONFLICT if an active key already exists', async () => {
+      const db = await setupTestDb(workerEnv.DB);
+      const caller = createTestCaller({
+        env: workerEnv,
+        db,
+        userId: 'owner-1',
+        orgId: 'test-org-1',
+        role: 'organiser',
+      });
+
+      // First generation succeeds
+      const first = await caller.generateApiKey();
+      expect(first.rawKey).toBeDefined();
+
+      // Second generation attempt rejects with CONFLICT (must use rotateApiKey instead)
+      await expect(caller.generateApiKey()).rejects.toThrow(
+        expect.objectContaining({
+          code: 'CONFLICT',
+          message: expect.stringContaining('already exists'),
+        }),
+      );
+    });
+
+    it('handles concurrent first-time generateApiKey calls: exactly one succeeds, stale callers rejected with CONFLICT, active hash matches fulfilled rawKey', async () => {
+      const db = await setupTestDb(workerEnv.DB);
+      const caller = createTestCaller({
+        env: workerEnv,
+        db,
+        userId: 'owner-1',
+        orgId: 'test-org-1',
+        role: 'organiser',
+      });
+
+      // Run multiple simultaneous first-time generateApiKey calls
       const promises = [
         caller.generateApiKey(),
-        caller.rotateApiKey(),
+        caller.generateApiKey(),
         caller.generateApiKey(),
       ];
 
       const results = await Promise.allSettled(promises);
 
-      // Verify each operation: either succeeded with valid rawKey, or rejected with a clean CONFLICT TRPCError (never an internal DB leak)
-      for (const res of results) {
-        if (res.status === 'fulfilled') {
-          expect(res.value.rawKey).toBeDefined();
-          expect(res.value.rawKey.startsWith(API_KEY_PREFIX)).toBe(true);
-          expect(res.value.keyPrefix).toBeDefined();
-        } else {
-          expect(res.reason).toBeInstanceOf(TRPCError);
-          expect((res.reason as TRPCError).code).toBe('CONFLICT');
-        }
-      }
-
-      // In D1, exactly ONE active key must exist for test-org-1
+      // Query the active key in D1
       const activeRows = await db
         .select()
         .from(organisationApiKeys)
@@ -226,12 +258,123 @@ describe('API Key Lifecycle & Public Read-Only API', () => {
           ),
         );
 
+      // Invariant: Exactly one active key exists in D1
       expect(activeRows.length).toBe(1);
+      const activeKeyRow = activeRows[0]!;
 
-      // The active key prefix in D1 must match getApiKeyInfo()
-      const info = await caller.getApiKeyInfo();
-      expect(info).not.toBeNull();
-      expect(info?.keyPrefix).toBe(activeRows[0]!.keyPrefix);
+      const fulfilled = results.filter(
+        (r): r is PromiseFulfilledResult<{ rawKey: string; keyPrefix: string; createdAt: number }> =>
+          r.status === 'fulfilled',
+      );
+      const rejected = results.filter(
+        (r): r is PromiseRejectedResult => r.status === 'rejected',
+      );
+
+      // Exactly ONE caller must succeed (no multiple successful callers returning dead keys)
+      expect(fulfilled.length).toBe(1);
+      expect(rejected.length).toBe(2);
+
+      // The fulfilled caller's rawKey hash MUST equal the active row's keyHash in D1
+      const winningRawKey = fulfilled[0]!.value.rawKey;
+      const winningHash = await hashApiKey(winningRawKey);
+      expect(winningHash).toBe(activeKeyRow.keyHash);
+
+      // Every rejected promise MUST be a clean TRPCError CONFLICT without leaking internal DB error text
+      for (const rej of rejected) {
+        expect(rej.reason).toBeInstanceOf(TRPCError);
+        const trpcErr = rej.reason as TRPCError;
+        expect(trpcErr.code).toBe('CONFLICT');
+        expect(trpcErr.message).not.toContain('SQLITE');
+        expect(trpcErr.message).not.toContain('D1_ERROR');
+      }
+    });
+
+    it('handles concurrent rotateApiKey calls: exactly one succeeds, stale callers rejected with CONFLICT, active hash matches fulfilled rawKey', async () => {
+      const db = await setupTestDb(workerEnv.DB);
+      const caller = createTestCaller({
+        env: workerEnv,
+        db,
+        userId: 'owner-1',
+        orgId: 'test-org-1',
+        role: 'organiser',
+      });
+
+      // Establish initial active key K0
+      const initialKey = await caller.generateApiKey();
+      expect(initialKey.rawKey).toBeDefined();
+
+      // Run multiple simultaneous rotateApiKey calls against the same active key K0
+      const promises = [
+        caller.rotateApiKey(),
+        caller.rotateApiKey(),
+        caller.rotateApiKey(),
+      ];
+
+      const results = await Promise.allSettled(promises);
+
+      // Query the active key in D1
+      const activeRows = await db
+        .select()
+        .from(organisationApiKeys)
+        .where(
+          and(
+            eq(organisationApiKeys.organisationId, 'test-org-1'),
+            isNull(organisationApiKeys.revokedAt),
+          ),
+        );
+
+      // Invariant: Exactly one active key exists in D1
+      expect(activeRows.length).toBe(1);
+      const activeKeyRow = activeRows[0]!;
+
+      const fulfilled = results.filter(
+        (r): r is PromiseFulfilledResult<{ rawKey: string; keyPrefix: string; createdAt: number }> =>
+          r.status === 'fulfilled',
+      );
+      const rejected = results.filter(
+        (r): r is PromiseRejectedResult => r.status === 'rejected',
+      );
+
+      // Exactly ONE caller must succeed in rotating the observed key
+      expect(fulfilled.length).toBe(1);
+      expect(rejected.length).toBe(2);
+
+      // The fulfilled caller's rawKey hash MUST equal the active row's keyHash in D1
+      const winningRawKey = fulfilled[0]!.value.rawKey;
+      const winningHash = await hashApiKey(winningRawKey);
+      expect(winningHash).toBe(activeKeyRow.keyHash);
+
+      // The initial key K0 must be revoked
+      const initialHash = await hashApiKey(initialKey.rawKey);
+      const [initialRow] = await db
+        .select()
+        .from(organisationApiKeys)
+        .where(eq(organisationApiKeys.keyHash, initialHash));
+      expect(initialRow?.revokedAt).not.toBeNull();
+
+      // Every rejected caller receives a clean CONFLICT error
+      for (const rej of rejected) {
+        expect(rej.reason).toBeInstanceOf(TRPCError);
+        const trpcErr = rej.reason as TRPCError;
+        expect(trpcErr.code).toBe('CONFLICT');
+        expect(trpcErr.message).not.toContain('SQLITE');
+        expect(trpcErr.message).not.toContain('D1_ERROR');
+      }
+
+      // Public API authenticates the winning rotated key and rejects the initial key
+      const winningApiRes = await SELF.fetch(
+        new Request('https://worker.dev/api/v1/events', {
+          headers: { Authorization: `Bearer ${winningRawKey}` },
+        }),
+      );
+      expect(winningApiRes.status).toBe(200);
+
+      const staleApiRes = await SELF.fetch(
+        new Request('https://worker.dev/api/v1/events', {
+          headers: { Authorization: `Bearer ${initialKey.rawKey}` },
+        }),
+      );
+      expect(staleApiRes.status).toBe(401);
     });
   });
 
@@ -243,10 +386,10 @@ describe('API Key Lifecycle & Public Read-Only API', () => {
       const db = await setupTestDb(workerEnv.DB);
 
       // Seed API keys for two distinct organisations
-      const org1Res = await createOrRotateApiKey(db, 'test-org-1');
+      const org1Res = await generateApiKey(db, 'test-org-1');
       org1ApiKey = org1Res.rawKey;
 
-      const org2Res = await createOrRotateApiKey(db, 'org-1');
+      const org2Res = await generateApiKey(db, 'org-1');
       org2ApiKey = org2Res.rawKey;
 
       // Seed events for org 1: 2 future events, 1 past event
@@ -401,7 +544,7 @@ describe('API Key Lifecycle & Public Read-Only API', () => {
 
     beforeEach(async () => {
       const db = await setupTestDb(workerEnv.DB);
-      const org1Res = await createOrRotateApiKey(db, 'test-org-1');
+      const org1Res = await generateApiKey(db, 'test-org-1');
       org1ApiKey = org1Res.rawKey;
 
       const futureDate = new Date(Date.now() + 86400000 * 2);
@@ -511,7 +654,7 @@ describe('API Key Lifecycle & Public Read-Only API', () => {
 
     it('returns Access-Control-Allow-Origin: * on GET /api/v1/events', async () => {
       const db = await setupTestDb(workerEnv.DB);
-      const { rawKey } = await createOrRotateApiKey(db, 'test-org-1');
+      const { rawKey } = await generateApiKey(db, 'test-org-1');
 
       const req = new Request('https://worker.dev/api/v1/events', {
         headers: { Authorization: `Bearer ${rawKey}` },
@@ -535,7 +678,7 @@ describe('API Key Lifecycle & Public Read-Only API', () => {
   describe('5. Rate Limiting on Public API', () => {
     it('rate limits public API requests per API key (300 req / 60s)', async () => {
       const db = await setupTestDb(workerEnv.DB);
-      const { rawKey } = await createOrRotateApiKey(db, 'test-org-1');
+      const { rawKey } = await generateApiKey(db, 'test-org-1');
 
       // The limit is 300; let's verify that when checkLimit returns allowed: false, 429 is returned
       // We can directly exhaust or simulate by making requests

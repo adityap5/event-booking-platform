@@ -1,30 +1,32 @@
 import { requireOrganiserRole } from '@event-booking/permissions';
 import { workerProcedure } from '../procedures.js';
 import {
-  createOrRotateApiKey,
+  generateApiKey,
+  rotateApiKey,
   getActiveApiKeyInfo,
   revokeApiKey,
 } from '../services/api-key-service.js';
 
 export const apiKeysRouter = {
   /**
-   * Generates a new API key for the caller's active organisation.
-   * If an active key already exists, it is revoked first.
+   * Generates the organisation's first active API key.
+   * Rejects with CONFLICT if an active key already exists (must use rotateApiKey).
    * Returns the raw key exactly once.
    */
   generateApiKey: workerProcedure.mutation(async ({ ctx }) => {
     const orgId = requireOrganiserRole(ctx, 'organiser');
-    return await createOrRotateApiKey(ctx.db, orgId);
+    return await generateApiKey(ctx.db, orgId);
   }),
 
   /**
-   * Rotates the API key for the caller's active organisation.
-   * Revokes the existing active key and generates a new one.
+   * Rotates the API key for the caller's active organisation using CAS semantics.
+   * Atomically revokes the observed active key and generates a replacement.
+   * If a concurrent rotation occurs, rejects with CONFLICT to prevent returning a stale key.
    * Returns the raw key exactly once.
    */
   rotateApiKey: workerProcedure.mutation(async ({ ctx }) => {
     const orgId = requireOrganiserRole(ctx, 'organiser');
-    return await createOrRotateApiKey(ctx.db, orgId);
+    return await rotateApiKey(ctx.db, orgId);
   }),
 
   /**

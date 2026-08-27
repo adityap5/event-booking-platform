@@ -774,20 +774,27 @@ When two organiser refund requests for the same booking arrive simultaneously:
   - Subsequent queries (`getApiKeyInfo`) and dashboard views only return the safe-to-display prefix (`evbk_` + first 8 characters + `...`) and `createdAt` timestamp.
   - The raw key is never stored in browser `localStorage`/`sessionStorage`, never written to structured logs, never printed in console output, and never transmitted to Sentry.
 
-### 3. Structural Database Invariant & Atomic D1 Batch Operations
+### 3. Structural Database Invariant & Atomic CAS State Transitions
 - **One Active Key Invariant:** Each organisation may possess at most one active key at a time.
 - **Structural Database Enforcement:** Enforced natively at the database level via a Drizzle SQLite partial unique index:
   ```sql
   CREATE UNIQUE INDEX `org_api_keys_active_org_idx` ON `organisation_api_keys` (`organisation_id`) WHERE revoked_at IS NULL;
   ```
-- **Atomic D1 Batch Operations (`db.batch()`):**
-  - Because D1 does not provide interactive `db.transaction()` rollbacks, key rotation and generation execute as an atomic D1 batch operation:
-    1. Statement 1: `UPDATE organisation_api_keys SET revoked_at = :now WHERE organisation_id = :orgId AND revoked_at IS NULL;`
+- **Compare-And-Swap (CAS) Concurrency Protection:**
+  - *The Race Problem:* If rotate operations unconditionally revoke "whatever key is currently active" and insert a new key in sequence, multiple concurrent callers would execute sequentially in D1: each caller would revoke the previous caller's newly created key, resulting in multiple callers receiving successful responses containing keys that were immediately revoked.
+  - *The CAS Solution:* `rotateApiKey` observes the specific active key record (`activeKey.id`). It performs an atomic D1 batch operation targeting that exact key:
+    1. Statement 1: `UPDATE organisation_api_keys SET revoked_at = :now WHERE id = :activeKey.id AND revoked_at IS NULL;`
     2. Statement 2: `INSERT INTO organisation_api_keys (id, organisation_id, key_hash, key_prefix, created_at) VALUES (...);`
-  - The new raw key is returned to the caller only after the atomic batch operation completes successfully.
-  - Soft revocation (`revoked_at` timestamp) preserves historical audit records consistent with the platform's append-heavy architecture.
+  - If a concurrent rotation already modified or revoked `activeKey.id`, Statement 1 affects 0 rows, and Statement 2 attempts to insert a second active key while the winner's key is active. The partial unique index (`org_api_keys_active_org_idx`) immediately trips, aborting the batch and rejecting the stale caller with a formatted `TRPCError` `CONFLICT`.
+  - For first-time generation (`generateApiKey`), concurrent callers attempt `INSERT` directly; the partial unique index ensures exactly one caller succeeds while stale callers receive `CONFLICT`.
+  - Stale/losing callers are rejected with `CONFLICT` and never receive a dead/revoked raw key.
 
-### 4. Permissive CORS & Security Boundary Architecture
+### 4. `generateApiKey` vs. `rotateApiKey` Semantics
+- **`generateApiKey`:** Intended for first-time key creation when an organisation has no active key. If an active key already exists, `generateApiKey` rejects with `CONFLICT` ("An active API key already exists for this organisation. Use rotateApiKey to replace it.").
+- **`rotateApiKey`:** Intended for replacing an existing active key. Uses CAS conditional batch updates to safely rotate the observed key. If concurrent rotation requests occur, stale callers receive `CONFLICT`.
+- Keeping these as distinct procedures provides explicit dashboard UI semantics (e.g. "Generate API Key" button shown only in empty state, "Rotate API Key" button shown when active key exists) and prevents accidental silent replacement of active integrations.
+
+### 5. Permissive CORS & Security Boundary Architecture
 - **Route-Specific Permissive CORS:**
   - Public API routes (`/api/v1/events` and `/api/v1/events/:id`) respond with:
     - `Access-Control-Allow-Origin: *`
@@ -799,11 +806,11 @@ When two organiser refund requests for the same booking arrive simultaneously:
   - Permissive CORS (`*`) is secure here because authentication uses an explicit bearer token, not ambient browser credentials (cookies, HTTP basic auth, or session tokens).
   - The platform's global frontend CORS allowlist (`CORS_ALLOWED_ORIGINS` in `cors.ts`) and all protected tRPC routes remain completely unchanged and strictly restricted.
 
-### 5. Exclusion of `lastUsedAt` Tracking
+### 6. Exclusion of `lastUsedAt` Tracking
 - Updating a `last_used_at` timestamp on each incoming read request would convert a lightweight, read-only cacheable hot path into a write-per-request hotspot on D1.
 - To maintain maximum throughput and low latency, `lastUsedAt` tracking was deliberately excluded.
 
-### 6. Endpoint Contracts & Boundaries
+### 7. Endpoint Contracts & Boundaries
 - **`GET /api/v1/events` (List Endpoint):**
   - **Filter:** Future events only (`events.date >= now`) belonging to the API key's organisation, ordered by `events.date ASC`.
   - **Public Safe Fields:** `id`, `name`, `date` (ms timestamp), `totalSeats`, `pricePerSeat`, `coverImageUrl`.
@@ -817,7 +824,7 @@ When two organiser refund requests for the same booking arrive simultaneously:
   - **Live Seat Composition:** Queries the event's `SeatLedger` DO (`stub.getAvailableSeats() ?? event.totalSeats`) and returns `availableSeats` in the JSON response.
   - **Unified 404 Behavior:** Returns generic 404 `{ "error": "Not Found" }` identically if the event does not exist OR belongs to another organisation, preventing organisation resource enumeration.
 
-### 7. Organiser Authorization Gating
+### 8. Organiser Authorization Gating
 - Organiser key-management mutations and queries (`generateApiKey`, `rotateApiKey`, `revokeApiKey`, `getApiKeyInfo`) in `apps/worker/src/routers/apiKeys.ts` require Clerk JWT authentication and enforce:
   1. `requireOrganiserRole(ctx, 'organiser')`
   2. `requireActiveOrganisation(ctx)`

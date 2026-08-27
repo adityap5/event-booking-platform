@@ -84,33 +84,109 @@ export async function getActiveApiKeyInfo(
   };
 }
 
+function isD1UniqueConstraintError(err: unknown): boolean {
+  const msg = [
+    (err as { message?: string })?.message,
+    (err as { cause?: { message?: string } })?.cause?.message,
+    (err as { cause?: string })?.cause,
+    String(err),
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  return (
+    msg.includes('unique constraint failed') ||
+    msg.includes('unique_constraint') ||
+    (msg.includes('d1_error') && msg.includes('unique'))
+  );
+}
+
 /**
- * Atomically revokes any current active key for the organisation and creates a replacement.
- * Uses an atomic D1 batch operation (db.batch()) to perform the revoke and insert.
- * Returns the raw key exactly once.
+ * Generates the organisation's first active API key.
+ * Rejects with CONFLICT if an active key already exists for the organisation.
+ * Uses the database-level partial unique index to guarantee that concurrent first-time
+ * generation attempts result in exactly one active key without stale key leaks.
  */
-export async function createOrRotateApiKey(
+export async function generateApiKey(
   db: DrizzleD1Database<typeof schema>,
   orgId: string,
 ): Promise<{ rawKey: string; keyPrefix: string; createdAt: number }> {
+  // Check if an active key already exists
+  const existing = await getActiveApiKeyInfo(db, orgId);
+  if (existing) {
+    throw new TRPCError({
+      code: 'CONFLICT',
+      message: 'An active API key already exists for this organisation. Use rotateApiKey to replace it.',
+    });
+  }
+
   const rawKey = generateRawApiKey();
   const keyHash = await hashApiKey(rawKey);
   const keyPrefix = extractKeyPrefix(rawKey);
   const newId = crypto.randomUUID();
   const now = new Date(Math.floor(Date.now() / 1000) * 1000);
 
-  // Prepare batch statements:
-  // 1. Revoke existing active keys for this org
-  // 2. Insert the new active key
-  const revokeStmt = db
-    .update(organisationApiKeys)
-    .set({ revokedAt: now })
+  try {
+    await db.insert(organisationApiKeys).values({
+      id: newId,
+      organisationId: orgId,
+      keyHash,
+      keyPrefix,
+      createdAt: now,
+      revokedAt: null,
+    });
+  } catch (err: unknown) {
+    if (isD1UniqueConstraintError(err)) {
+      throw new TRPCError({
+        code: 'CONFLICT',
+        message: 'A concurrent API key operation is in progress. Please try again.',
+      });
+    }
+    throw err;
+  }
+
+  return {
+    rawKey,
+    keyPrefix,
+    createdAt: now.getTime(),
+  };
+}
+
+/**
+ * Rotates an active API key using compare-and-swap (CAS) semantics.
+ * Requires an existing active key to rotate (rejects with CONFLICT if none exists).
+ * Identifies the specific observed active key ID and atomically revokes it while inserting
+ * the replacement key in a single D1 batch operation. If the observed key is no longer active
+ * (e.g. rotated concurrently by another request), the operation fails with CONFLICT rather than
+ * returning a stale/dead key.
+ */
+export async function rotateApiKey(
+  db: DrizzleD1Database<typeof schema>,
+  orgId: string,
+): Promise<{ rawKey: string; keyPrefix: string; createdAt: number }> {
+  const [activeKey] = await db
+    .select({ id: organisationApiKeys.id })
+    .from(organisationApiKeys)
     .where(
       and(
         eq(organisationApiKeys.organisationId, orgId),
         isNull(organisationApiKeys.revokedAt),
       ),
     );
+
+  if (!activeKey) {
+    throw new TRPCError({
+      code: 'CONFLICT',
+      message: 'No active API key exists for this organisation. Use generateApiKey to create the first key.',
+    });
+  }
+
+  const rawKey = generateRawApiKey();
+  const keyHash = await hashApiKey(rawKey);
+  const keyPrefix = extractKeyPrefix(rawKey);
+  const newId = crypto.randomUUID();
+  const now = new Date(Math.floor(Date.now() / 1000) * 1000);
 
   const insertStmt = db.insert(organisationApiKeys).values({
     id: newId,
@@ -121,20 +197,26 @@ export async function createOrRotateApiKey(
     revokedAt: null,
   });
 
-  // Execute as an atomic D1 batch operation
+  // CAS: Target the exact active key ID observed. If another caller already rotated it,
+  // this update affects 0 rows, and the subsequent insert fails on the partial unique index
+  // (org_api_keys_active_org_idx), rejecting the stale caller atomically.
+  const revokeStmt = db
+    .update(organisationApiKeys)
+    .set({ revokedAt: now })
+    .where(
+      and(
+        eq(organisationApiKeys.id, activeKey.id),
+        isNull(organisationApiKeys.revokedAt),
+      ),
+    );
+
   try {
     await db.batch([revokeStmt, insertStmt]);
   } catch (err: unknown) {
-    const errStr = err instanceof Error ? err.message : String(err);
-    if (
-      errStr.includes('UNIQUE constraint') ||
-      errStr.includes('D1_ERROR') ||
-      errStr.includes('constraint failed')
-    ) {
+    if (isD1UniqueConstraintError(err)) {
       throw new TRPCError({
         code: 'CONFLICT',
         message: 'A concurrent API key operation is in progress. Please try again.',
-        cause: err,
       });
     }
     throw err;
