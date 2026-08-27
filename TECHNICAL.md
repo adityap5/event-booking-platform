@@ -245,6 +245,8 @@ organisation_api_keys
 
 **DO/D1 boundary for seat state:** D1's `bookings` table is the durable record of what was actually paid for and confirmed. The DO's own SQLite `reservations` table is the live, serialised source of truth for "is this seat available right now" — it exists only inside the DO instance for that event, is not queried directly by any other part of the system, and a pending hold in the DO does not yet have a corresponding bookings row in D1 (that row is only written by `confirmBookingFromPayment`, called exclusively from the Stripe webhook — see §2a). There is no client-triggered confirm path; confirmation happens server-side only, driven by a verified Stripe payment event.
 
+**The Confirm Failure Window:** The DO/D1 split introduces a strict boundary where a hold is atomically locked/confirmed in the DO, but the durable `bookings` row must subsequently be written to D1 via the tRPC router. If the DO confirms the hold and the ensuing D1 insert fails (e.g., network fault or DB constraint error), the seat is permanently consumed in the DO without a corresponding booking record. This is a known trade-off acceptable at this scale, and this exact failure mode is systematically detected in production by the nightly reconciliation job, which cross-references DO reservations against D1 bookings and logs orphaned holds to Sentry/Axiom for manual remediation.
+
 **DO Internal Storage Tables (SQLite):**
 - `event_state` (`id INTEGER PRIMARY KEY, total_seats INTEGER, initialized INTEGER`): Single row storing total event capacity.
 - `reservations` (`id TEXT PRIMARY KEY, user_id TEXT, seat_count INTEGER, expires_at INTEGER, status TEXT`): Holds active (`pending`, `confirmed`) and terminal (`released`, `refunded`) reservation rows.
@@ -334,6 +336,8 @@ Same idempotency and failure-handling contract as above.
 
 **Integration payloads:** Real `eventName` and `eventDate` are queried from D1 by the Stripe webhook handler and threaded through to `dispatchEmailConfirmation` and `dispatchCalendarInvite` (omitted if event metadata is unavailable, preventing placeholder data). `organizerEmail` is optional and currently omitted until organiser email resolution is added.
 
+**Header Injection Warning:** When a real email provider is wired in, ensure that newlines (`\r`, `\n`) are strictly stripped or escaped from `to` and `attendeeName` payloads before passing them to the provider. Unescaped newlines in those user-controlled fields become header-injection vectors.
+
 ---
 
 ## 9. Local Setup and Deployment
@@ -378,7 +382,7 @@ This required a chain of supporting fixes, each worth knowing about if touching 
 
 `apps/worker/src/cors.ts` holds `resolveAllowedOrigin(request)`, which echoes back the matching origin from the incoming request's `Origin` header (falling back to the deployed URL if no match) — not `*`, origins are explicitly enumerated. `Access-Control-Allow-Origin` only supports a single value per response, so a static single-origin constant cannot serve both a deployed app and local dev simultaneously — this must be resolved per-request.
 
-**Two separate exports, not one (Day 3, Phase 2):** `CORS_ALLOWED_ORIGINS` and `JWT_AUTHORIZED_PARTIES` are kept as distinct constants even though they're currently identical (one entry: the deployed web-app URL). Originally a single `ALLOWED_ORIGINS` array was used for both CORS resolution *and* Clerk's `authorizedParties` JWT-audience check — which meant a JWT scoped to `http://localhost:3000` (present in that array for dev convenience) was valid against production. Dev/localhost/LAN origins were removed from the codebase entirely rather than gated behind an environment check — dev auth should point at a separate Clerk dev instance, not share production's trust boundary. The two constants stay separate so a future CORS-only dev origin can't silently become a trusted JWT audience by sharing the same value.
+**Two separate exports, not one (Day 3, Phase 2):** `CORS_ALLOWED_ORIGINS` and `JWT_AUTHORIZED_PARTIES` are kept as distinct constants even though they're currently identical (one entry: the deployed web-app URL). Originally a single `ALLOWED_ORIGINS` array was used for both CORS resolution *and* Clerk's `authorizedParties` JWT-audience check — which meant a JWT scoped to `http://localhost:3000` (present in that array for dev convenience) was valid against production. Dev/localhost/LAN origins were removed from the codebase entirely rather than gated behind an environment check. **Note:** These arrays remain hardcoded static strings in `cors.ts` (see §10 Known Weaknesses) rather than being populated by `env.WEB_APP_URL`.
 
 ---
 
@@ -387,9 +391,10 @@ This required a chain of supporting fixes, each worth knowing about if touching 
 - Reconciliation job implemented; automatic healing remains deferred. The job detects confirmed DO holds without corresponding D1 bookings and raises an audit/Sentry alert, but deliberately does not create or repair booking rows.
 - **`seat-ledger.ts` uses raw SQL, not Drizzle** — see point 2, deliberately deferred alongside its structural modularisation.
 - **`apps/worker/src/router.ts` and `index.ts` have been split into `routers/`, `handlers/`, and `procedures.ts`; `seat-ledger.ts` and the web-app have not yet received the same treatment** — see `ROADMAP.md`.
-- **User-facing hold release (`releaseHold`):** Implemented via an ownership-checked `releaseHold` tRPC procedure, wired to `booking/cancelled.tsx` on Stripe checkout abandonment and to the "Release previous hold & retry" flow in `pages/events/[id].tsx` when a user encounters `TOO_MANY_PENDING_HOLDS`.
-- **`getPublicEvent`'s cached metadata is never invalidated on event update.** The 5-minute KV cache described in §6 had exactly one invalidation path, `invalidateEventCache` — never called anywhere in the frontend, confirmed by grep before it was removed as dead code alongside `whoami`/`getEvent`/etc. on Day 1 Phase 2. Net effect, present since before that cleanup: editing an event's name/description/price does not update what public visitors see for up to 5 minutes; the cleanup didn't introduce this, it just removed the never-used procedure that was theoretically supposed to prevent it. Fix: whichever mutation updates an event row should call `ctx.env.EVENT_CACHE.delete(...)` inline, immediately after the D1 write succeeds — not via a separately exposed procedure the frontend has to remember to call.
 - **Pagination Limits vs CPU Execution Time:** `listPublicEvents` enforces a hard `MAX_OFFSET = 10000`. Cloudflare D1/SQLite offset pagination performs an index scan, and excessively deep offsets (e.g., 500k) consume too much CPU time under the Workers 50ms subrequest budget. This protects the runtime but restricts pagination depth. If datasets grow extremely large, this must be refactored to use cursor-based pagination.
+- **Hardcoded URLs in Edge/Middleware Boundaries:** While application URLs were moved to environment config, two locations retain hardcoded domains:
+  1. `apps/web-app/middleware.ts` Content-Security-Policy URLs. Next.js edge middleware cannot access dynamic runtime non-`NEXT_PUBLIC_` environment variables without Cloudflare bindings, so static domains are retained as an explicit, zero-dependency policy.
+  2. `apps/worker/src/cors.ts` (`CORS_ALLOWED_ORIGINS` and `JWT_AUTHORIZED_PARTIES`). These remain static array constants rather than dynamically resolving against `env.WEB_APP_URL`, making the CORS and JWT-audience boundaries static configuration rather than runtime-derived.
 
 ## 11. Test Suite (Day 2, Phase 2)
 
@@ -472,9 +477,9 @@ neither had an index to use). Dropped `booking_stripe_idx` on `stripe_payment_in
 
 - **Reviewed and confirmed clean, not a finding**: realtime/socket-ticket authorization (`routers/realtime.ts`, `SeatLedger.mintTicket`/`redeemTicket`). Any authenticated user can request a ticket for any event, with no org/role check — but the only data ever broadcast over the resulting WebSocket (`{ type: 'seat_count', available }`) is identical to what `getAvailableSeats` already serves fully unauthenticated. The ticket gate is, if anything, more restrictive than the sensitivity of the data behind it warrants, not less. Tickets are correctly scoped at mint time from server-derived `ctx.userId`/ `ctx.orgId` (never client input), and doubly scoped at redemption — once by which DO instance the ticket even exists in, once again by an explicit `eventId` equality check.
 
-- **`createEvent` restricted to `organiser`.** New `requireOrganiserRole(ctx, requiredRole)` in `packages/permissions/src/index.ts`, kept separate from `requireActiveOrganisation` (other org-scoped read procedures — `listOrgEvents`, `getEventAttendees` — intentionally stay open to all org members). This is a defensive fix, not a response to a live exploit: verified first that no invite-member feature exists anywhere in the codebase (`become-organiser.tsx` uses Clerk's own `<CreateOrganization />` with no custom member-invite flow), so every organisation today has exactly one member, always admin — the gap is currently unreachable. Fixed ahead of the onboarding page's own copy, which already promises "invite team members later."
+- **Organiser-restricted endpoints (`createEvent`, `/upload/event-cover`).** New `requireOrganiserRole(ctx, requiredRole)` in `packages/permissions/src/index.ts`, kept separate from `requireActiveOrganisation` (other org-scoped read procedures — `listOrgEvents`, `getEventAttendees` — intentionally stay open to all org members). The same role check logic is manually enforced in the HTTP upload handler for `/upload/event-cover` by checking the Clerk JWT `o` (org) claim. This is a defensive fix, not a response to a live exploit: verified first that no invite-member feature exists anywhere in the codebase (`become-organiser.tsx` uses Clerk's own `<CreateOrganization />` with no custom member-invite flow), so every organisation today has exactly one member, always admin — the gap is currently unreachable. Fixed ahead of the onboarding page's own copy, which already promises "invite team members later."
 
-- **Rate limiting added to two previously-unprotected authenticated procedures**, both using the existing `RateLimiter` DO, keyed by `userId`, 10/60s — same pattern as reserveSeat`/`uploadEventCover`/`createEvent`:
+- **Rate limiting added to two previously-unprotected authenticated procedures**, both using the existing `RateLimiter` DO, keyed by `userId`, 10/60s — same pattern as `reserveSeat` / `uploadEventCover` / `createEvent`:
   - `createCheckoutSession` (`routers/payments.ts`) — previously uncapped despite creating real external Stripe Checkout Session resources per call.
   - `createSocketTicket` (`routers/realtime.ts`) — previously uncapped despite consuming Durable Object resources per call.
 
@@ -488,6 +493,12 @@ No change was made. Documented here so this doesn't get re-flagged later without
 ## 13. Response Headers & Request Hardening (Day 4, Phase 2)
 
 - **Cleanup batch, zero remaining judgment calls**: orphaned `packages/shared/drizzle/` directory deleted; `dispatchCalendarInvite`'s `organizerEmail` omission in `stripe-webhook.ts` now has an explanatory comment (no organiser-email lookup exists yet); the two real `any` types fixed (`procedures.ts`'s DO id, now `DurableObjectId`; `clerk-webhook.ts`'s `evt: any` deliberately left — svix/`@clerk/backend` have no usable type); stray debug `console.log`s removed from `clerk-webhook.ts`; `robots.txt` added to `web-app`.
+
+- **Hardcoded URLs removed.** All environment-specific URLs have been moved to configuration (`.dev.vars`, `.env.local`, `wrangler.jsonc`).
+  - Worker's `WEB_APP_URL` now drives Stripe redirect URIs in `createCheckoutSession`.
+  - Worker's `WORKER_URL` now drives image-URL construction in `createEvent`.
+  - Web App's `NEXT_PUBLIC_WS_URL` and `NEXT_PUBLIC_UPLOAD_URL` replace static strings in `useSeatCount.ts` and `pages/events/create.tsx`.
+  This prevents local development requests from accidentally hitting production endpoints and cleans up deployment configuration.
 
 - **POST body size cap — 100KB, two-layer enforcement.** Nothing previously bounded raw tRPC request body size; `fetchRequestHandler` buffers and parses the full JSON body before Zod validation runs, so an unauthenticated caller could force the worker to buffer/parse an arbitrarily large body before anything rejects it. `checkBodySize()` in `index.ts` does a `Content-Length`-header fast-path rejection when present and trustworthy, and falls back to incremental byte-counting via `request.body.getReader()` (never buffering past the limit) when the header is absent or unreliable — chunks are preserved and reassembled into a reconstructed `Request` for the under-limit case, since reading `body` consumes it. Cap: 102400 bytes — largest legitimate payload (`createEvent`: name ≤200 chars, description ≤2000 chars, few numeric fields) is under 3KB even batched, so this is generous headroom, not a derived number.
   **Known runtime gotcha, worth documenting so it doesn't get re-flagged**: `SELF.fetch` (real dispatch in `@cloudflare/vitest-pool-workers`, not local `new Request()` construction) auto-computes and injects a `Content-Length` header for plain `Uint8Array`/`ArrayBuffer`-backed bodies. This means a naive boundary test using `Uint8Array` bodies silently exercises the `Content-Length` fast path for *both* the accept and reject cases, never the streaming reader loop's own boundary — the exact-boundary test for the streaming path (`102400`/`102401` bytes) has to use a real `ReadableStream` body (no explicit `Content-Length`) to genuinely prove the reader loop's own comparison is correct, not just the header check's.
@@ -888,16 +899,24 @@ When two organiser refund requests for the same booking arrive simultaneously:
   - **Filter:** Future events only (`events.date >= now`) belonging to the API key's organisation, ordered by `events.date ASC`.
   - **Public Safe Fields:** `id`, `name`, `date` (ms timestamp), `totalSeats`, `pricePerSeat`, `coverImageUrl`.
   - **No DO Fanout:** Deliberately excludes live seat count Durable Object lookups to eliminate N+1 DO requests.
-  - **Pagination Contract:**
-    - `limit`: defaults to `50`, maximum `100` (clamped, not rejected).
-    - `offset`: defaults to `0`.
-    - Response structure: `{ events: [...], pagination: { limit, offset, hasMore } }`.
 - **`GET /api/v1/events/:id` (Single Event Endpoint):**
   - **Filter:** Returns event where `events.id = :id` AND `events.organisationId = :orgId`. Allows retrieving past events belonging to the organisation.
   - **Live Seat Composition:** Queries the event's `SeatLedger` DO (`stub.getAvailableSeats() ?? event.totalSeats`) and returns `availableSeats` in the JSON response.
   - **Unified 404 Behavior:** Returns generic 404 `{ "error": "Not Found" }` identically if the event does not exist OR belongs to another organisation, preventing organisation resource enumeration.
 
-### 8. Organiser Authorization Gating
+### 8. Day 11 Public API Architecture
+- **Raw HTTP vs. tRPC:** The public API (`/api/v1/events`) is implemented as raw HTTP handlers (`apps/worker/src/handlers/public-api.ts`) built directly on the standard `Request`/`Response` API, completely bypassing the tRPC router.
+- **Why Bypass tRPC?** tRPC is strictly designed for first-party frontend-to-backend communication. It uses a bespoke, batch-optimized JSON-RPC-like envelope that is hostile to third-party integrators expecting standard RESTful JSON APIs. The raw HTTP handlers provide a clean, predictable REST contract for external developers while internally reusing the exact same Drizzle queries and DO stubs.
+
+### 9. API Pagination Implementation Detail
+- **Mechanism:** Offset-based pagination over D1 SQLite.
+- **Contract:**
+  - `limit`: defaults to `50`. Client-provided values are clamped to a maximum of `100` rather than rejected with `400 Bad Request`, ensuring over-eager clients gracefully receive standard page sizes instead of failing.
+  - `offset`: defaults to `0`.
+  - **Response Structure:** `{ events: [...], pagination: { limit, offset, hasMore: boolean } }`. `hasMore` is derived by fetching `limit + 1` rows from D1 and returning `limit` rows, popping the extra row to set `hasMore = true`.
+- **Runtime Protection Guardrail:** `offset` is strictly clamped to `MAX_OFFSET = 10000` (see §10). This protects the Worker's CPU time limits against excessively deep SQLite index scans, enforcing a ceiling on query cost for unauthenticated or abusive iteration.
+
+### 10. Organiser Authorization Gating
 - Organiser key-management mutations and queries (`generateApiKey`, `rotateApiKey`, `revokeApiKey`, `getApiKeyInfo`) in `apps/worker/src/routers/apiKeys.ts` require Clerk JWT authentication and enforce:
   1. `requireOrganiserRole(ctx, 'organiser')`
   2. `requireActiveOrganisation(ctx)`
