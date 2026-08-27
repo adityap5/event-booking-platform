@@ -90,10 +90,25 @@ export default function EventPage({
   const [seatCount, setSeatCount] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pendingHoldId, setPendingHoldId] = useState<string | null>(null);
+  const [hasHoldConflict, setHasHoldConflict] = useState(false);
+
+  // Initialize stored holdId on mount if available in session
+  useEffect(() => {
+    try {
+      const stored = sessionStorage.getItem(`pending_hold_${event.id}`);
+      if (stored) {
+        setPendingHoldId(stored);
+      }
+    } catch {
+      // Ignore storage access errors
+    }
+  }, [event.id]);
 
   const handleBook = async () => {
     setLoading(true);
     setError(null);
+    setHasHoldConflict(false);
     try {
       const trpc = createAuthenticatedTRPCClient(getToken);
 
@@ -103,6 +118,14 @@ export default function EventPage({
         eventId: event.id,
         seatCount,
       });
+
+      // Save holdId so user can release & retry if they abandon checkout
+      try {
+        sessionStorage.setItem(`pending_hold_${event.id}`, reservationId);
+      } catch {
+        // Ignore storage access errors
+      }
+      setPendingHoldId(reservationId);
 
       const { sessionUrl } = await trpc.createCheckoutSession.mutate({
         holdId: reservationId,
@@ -116,7 +139,84 @@ export default function EventPage({
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Something went wrong';
-      setError(msg);
+      if (msg === 'TOO_MANY_PENDING_HOLDS' || msg.includes('TOO_MANY_PENDING_HOLDS')) {
+        setHasHoldConflict(true);
+        setError('You already have a pending hold for this event.');
+      } else {
+        setError(msg);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleReleaseAndRetry = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const trpc = createAuthenticatedTRPCClient(getToken);
+      let holdIdToRelease = pendingHoldId;
+      if (!holdIdToRelease) {
+        try {
+          holdIdToRelease = sessionStorage.getItem(`pending_hold_${event.id}`);
+        } catch {
+          // Ignore
+        }
+      }
+
+      if (holdIdToRelease) {
+        // Step 1: releaseHold MUST succeed before proceeding
+        await trpc.releaseHold.mutate({
+          eventId: event.id,
+          holdId: holdIdToRelease,
+        });
+
+        // Step 2: Clear old hold reference only after releaseHold succeeds
+        try {
+          const stored = sessionStorage.getItem(`pending_hold_${event.id}`);
+          if (stored === holdIdToRelease) {
+            sessionStorage.removeItem(`pending_hold_${event.id}`);
+          }
+        } catch {
+          // Ignore storage access errors
+        }
+        setPendingHoldId(null);
+      }
+
+      setHasHoldConflict(false);
+
+      // Retry reservation with currently selected seatCount
+      await trpc.ensureAttendee.mutate();
+      const { reservationId } = await trpc.reserveSeat.mutate({
+        eventId: event.id,
+        seatCount,
+      });
+
+      try {
+        sessionStorage.setItem(`pending_hold_${event.id}`, reservationId);
+      } catch {
+        // Ignore
+      }
+      setPendingHoldId(reservationId);
+
+      const { sessionUrl } = await trpc.createCheckoutSession.mutate({
+        holdId: reservationId,
+        eventId: event.id,
+      });
+
+      if (sessionUrl) {
+        window.location.href = sessionUrl;
+      } else {
+        setError('Could not create checkout session');
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Something went wrong';
+      if (msg === 'TOO_MANY_PENDING_HOLDS' || msg.includes('TOO_MANY_PENDING_HOLDS')) {
+        setHasHoldConflict(true);
+        setError('You already have a pending hold for this event.');
+      } else {
+        setError(msg);
+      }
     } finally {
       setLoading(false);
     }
@@ -226,13 +326,42 @@ export default function EventPage({
             {loading ? 'Processing…' : 'Book Ticket'}
           </button>
 
-          {/* Error */}
+          {/* Error & actionable retry */}
           {error && (
-            <p style={{ color: '#c0392b', marginTop: '1rem' }}>{error}</p>
+            <div style={{ marginTop: '1rem' }}>
+              <p style={{ color: '#c0392b', marginBottom: hasHoldConflict ? '0.5rem' : '0' }}>{error}</p>
+              {hasHoldConflict && (
+                <div style={{ marginTop: '0.5rem' }}>
+                  <p style={{ color: '#555', fontSize: '0.9rem', marginBottom: '0.75rem' }}>
+                    You have an unconfirmed reservation from a previous attempt.
+                  </p>
+                  {pendingHoldId ? (
+                    <button
+                      onClick={() => { void handleReleaseAndRetry(); }}
+                      disabled={loading}
+                      style={{
+                        padding: '0.5rem 1rem',
+                        fontSize: '0.9rem',
+                        backgroundColor: '#e74c3c',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '6px',
+                        cursor: loading ? 'not-allowed' : 'pointer',
+                      }}
+                    >
+                      {loading ? 'Releasing…' : 'Release previous hold & retry'}
+                    </button>
+                  ) : (
+                    <p style={{ color: '#777', fontSize: '0.85rem' }}>
+                      Pending holds expire automatically after 15 minutes.
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
           )}
         </div>
       )}
     </div>
   );
 }
-

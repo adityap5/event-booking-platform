@@ -110,6 +110,9 @@ export default function DashboardPage() {
             <Link href="/events/create" style={{ display: 'inline-block', padding: '0.5rem 1rem', fontSize: '1rem', backgroundColor: '#0070f3', color: 'white', textDecoration: 'none', borderRadius: '4px', fontWeight: 500 }}>
               Create Event
             </Link>
+            <Link href="/events/manage" style={{ display: 'inline-block', padding: '0.5rem 1rem', fontSize: '1rem', backgroundColor: '#f3f4f6', color: '#1f2937', textDecoration: 'none', borderRadius: '4px', fontWeight: 500, border: '1px solid #d1d5db' }}>
+              Manage Events
+            </Link>
             <Link href="/dashboard/billing" style={{ display: 'inline-block', padding: '0.5rem 1rem', fontSize: '1rem', backgroundColor: '#f3f4f6', color: '#1f2937', textDecoration: 'none', borderRadius: '4px', fontWeight: 500, border: '1px solid #d1d5db' }}>
               Billing &amp; Subscription
             </Link>

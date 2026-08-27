@@ -91,7 +91,7 @@ export const paymentsRouter = {
           },
         },
         success_url: `${ctx.env.WEB_APP_URL}/booking/success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${ctx.env.WEB_APP_URL}/booking/cancelled`,
+        cancel_url: `${ctx.env.WEB_APP_URL}/booking/cancelled?holdId=${encodeURIComponent(input.holdId)}&eventId=${encodeURIComponent(input.eventId)}`,
       });
 
       return { sessionUrl: session.url };

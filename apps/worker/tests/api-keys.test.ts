@@ -495,7 +495,7 @@ describe('API Key Lifecycle & Public Read-Only API', () => {
       expect(data1.pagination.limit).toBe(1);
       expect(data1.pagination.offset).toBe(0);
 
-      // Test offset = 1
+      // Test offset = 1 (normal offset)
       const req2 = new Request('https://worker.dev/api/v1/events?limit=1&offset=1', {
         headers: { Authorization: `Bearer ${org1ApiKey}` },
       });
@@ -512,6 +512,56 @@ describe('API Key Lifecycle & Public Read-Only API', () => {
       const res3 = await SELF.fetch(req3);
       const data3 = (await res3.json()) as any;
       expect(data3.pagination.limit).toBe(100);
+
+      // Test negative limit (< 1) defaults to 50
+      const reqLimitNeg = new Request('https://worker.dev/api/v1/events?limit=-5', {
+        headers: { Authorization: `Bearer ${org1ApiKey}` },
+      });
+      const resLimitNeg = await SELF.fetch(reqLimitNeg);
+      const dataLimitNeg = (await resLimitNeg.json()) as any;
+      expect(dataLimitNeg.pagination.limit).toBe(50);
+    });
+
+    it('clamps offset parameter: negative offset, normal offset, exactly max (10000), above max (15000)', async () => {
+      // 1. Negative offset: clamped to 0
+      const reqNeg = new Request('https://worker.dev/api/v1/events?offset=-10', {
+        headers: { Authorization: `Bearer ${org1ApiKey}` },
+      });
+      const resNeg = await SELF.fetch(reqNeg);
+      const dataNeg = (await resNeg.json()) as any;
+      expect(dataNeg.pagination.offset).toBe(0);
+      expect(dataNeg.events.length).toBe(2);
+      expect(dataNeg.events[0].id).toBe('org1-evt-future-1');
+
+      // 2. Normal offset: offset = 1
+      const reqNorm = new Request('https://worker.dev/api/v1/events?offset=1', {
+        headers: { Authorization: `Bearer ${org1ApiKey}` },
+      });
+      const resNorm = await SELF.fetch(reqNorm);
+      const dataNorm = (await resNorm.json()) as any;
+      expect(dataNorm.pagination.offset).toBe(1);
+      expect(dataNorm.events.length).toBe(1);
+      expect(dataNorm.events[0].id).toBe('org1-evt-future-2');
+
+      // 3. Exactly maximum offset: offset = 10000
+      const reqExactMax = new Request('https://worker.dev/api/v1/events?offset=10000', {
+        headers: { Authorization: `Bearer ${org1ApiKey}` },
+      });
+      const resExactMax = await SELF.fetch(reqExactMax);
+      const dataExactMax = (await resExactMax.json()) as any;
+      expect(dataExactMax.pagination.offset).toBe(10000);
+      expect(dataExactMax.events.length).toBe(0);
+      expect(dataExactMax.pagination.hasMore).toBe(false);
+
+      // 4. Above maximum offset: offset = 15000 clamped to 10000
+      const reqAboveMax = new Request('https://worker.dev/api/v1/events?offset=15000', {
+        headers: { Authorization: `Bearer ${org1ApiKey}` },
+      });
+      const resAboveMax = await SELF.fetch(reqAboveMax);
+      const dataAboveMax = (await resAboveMax.json()) as any;
+      expect(dataAboveMax.pagination.offset).toBe(10000);
+      expect(dataAboveMax.events.length).toBe(0);
+      expect(dataAboveMax.pagination.hasMore).toBe(false);
     });
 
     it('rejects missing or malformed Authorization header with generic 401 Unauthorized', async () => {

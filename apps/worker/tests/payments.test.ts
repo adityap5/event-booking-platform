@@ -133,6 +133,9 @@ describe('paymentsRouter.createCheckoutSession', () => {
       // Stripe quantity must match the hold seatCount (3), NOT any client parameter
       expect(params.get('line_items[0][quantity]')).toBe('3');
       expect(params.get('line_items[0][price_data][unit_amount]')).toBe('1500');
+      expect(params.get('cancel_url')).toBe(
+        `${workerEnv.WEB_APP_URL}/booking/cancelled?holdId=${encodeURIComponent(hold.reservationId)}&eventId=${encodeURIComponent(eventId)}`
+      );
     } finally {
       stripeMock.restore();
     }

@@ -39,9 +39,18 @@ export interface PublicEventDetailItem {
   organisationId: string;
 }
 
+export const MAX_OFFSET = 10_000;
+export const MAX_LIMIT = 100;
+export const DEFAULT_LIMIT = 50;
+
 /**
  * Queries future events for a specific organisation with bounded pagination.
  * Excludes live seat count DO lookups to avoid N+1 DO calls.
+ *
+ * Pagination Bounds Rationale:
+ * - MAX_LIMIT = 100 bounds maximum response payload size and serialisation time per request.
+ * - MAX_OFFSET = 10,000 bounds SQLite/D1 index scan depth (avoiding slow full-index scans and worker CPU timeouts)
+ *   while supporting up to 100 pages of 100 events (or 200 pages of 50 events) for an organisation's future listings.
  */
 export async function listOrgPublicEvents(
   db: DrizzleD1Database<typeof schema>,
@@ -49,12 +58,13 @@ export async function listOrgPublicEvents(
   params: PaginationParams = {},
 ): Promise<PublicEventListResponse> {
   // Normalize & clamp pagination parameters
-  let limit = params.limit !== undefined && !isNaN(params.limit) ? Math.floor(params.limit) : 50;
-  if (limit < 1) limit = 50;
-  if (limit > 100) limit = 100; // Clamp max 100
+  let limit = params.limit !== undefined && !isNaN(params.limit) ? Math.floor(params.limit) : DEFAULT_LIMIT;
+  if (limit < 1) limit = DEFAULT_LIMIT;
+  if (limit > MAX_LIMIT) limit = MAX_LIMIT; // Clamp max 100
 
   let offset = params.offset !== undefined && !isNaN(params.offset) ? Math.floor(params.offset) : 0;
   if (offset < 0) offset = 0;
+  if (offset > MAX_OFFSET) offset = MAX_OFFSET; // Clamp max 10000
 
   const now = new Date();
 
