@@ -33,8 +33,9 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
         stripeSignature,
         env.STRIPE_WEBHOOK_SECRET,
       );
-    } catch (err: any) {
-      console.error('Stripe signature verification failed:', err.message);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error('Stripe signature verification failed:', message);
       return new Response('Invalid signature', { status: 400 });
     }
 
@@ -61,7 +62,7 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
           stripePaymentIntentId: paymentIntent.id,
           amountReceivedPence: paymentIntent.amount_received,
         });
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error('payment_intent.succeeded: unexpected confirmSeat error:', err);
         Sentry.captureException(err, {
           extra: {

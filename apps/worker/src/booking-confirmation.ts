@@ -112,10 +112,11 @@ export async function confirmBookingFromPayment(
   let confirmResult: { userId: string; seatCount: number };
   try {
     confirmResult = await seatLedger.confirmSeat(holdId);
-  } catch (err: any) {
-    if (err.message === 'HOLD_NOT_FOUND') return { outcome: 'hold_not_found' };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String((err as { message?: unknown })?.message ?? '');
+    if (message === 'HOLD_NOT_FOUND') return { outcome: 'hold_not_found' };
 
-    if (err.message === 'HOLD_ALREADY_USED') {
+    if (message === 'HOLD_ALREADY_USED') {
       // Do NOT assume this means "already confirmed" — verify a booking
       // actually exists. See the 'orphaned_hold' / 'already_confirmed'
       // doc comments above for why this distinction is load-bearing.
@@ -130,7 +131,7 @@ export async function confirmBookingFromPayment(
       return { outcome: 'orphaned_hold', holdId, eventId };
     }
 
-    if (err.message === 'HOLD_EXPIRED') {
+    if (message === 'HOLD_EXPIRED') {
       await seatLedger.releaseSeat(holdId);
       return { outcome: 'hold_expired' };
     }

@@ -183,7 +183,7 @@ export const bookingsRouter = {
         name: resolvedName,
       }).returning();
       return newAttendee;
-    } catch (err: any) {
+    } catch (err: unknown) {
       const [existingAttendee] = await db.select().from(schema.attendees).where(eq(schema.attendees.userId, ctx.userId));
       if (existingAttendee) {
         return existingAttendee;

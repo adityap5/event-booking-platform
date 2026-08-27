@@ -5,6 +5,16 @@ import * as schema from '@event-booking/shared';
 import type { Env } from '../index.js';
 import * as Sentry from '@sentry/cloudflare';
 
+interface ClerkWebhookEvent {
+  type: string;
+  data: {
+    id: string;
+    name: string;
+    created_by: string;
+    created_at?: number;
+  };
+}
+
 export async function handleClerkWebhook(request: Request, env: Env): Promise<Response | null> {
   const url = new URL(request.url);
   
@@ -25,15 +35,16 @@ export async function handleClerkWebhook(request: Request, env: Env): Promise<Re
     const payload = await request.text();
     const wh = new Webhook(WEBHOOK_SECRET);
 
-    let evt: any;
+    let evt: ClerkWebhookEvent;
     try {
       evt = wh.verify(payload, {
         "svix-id": svix_id,
         "svix-timestamp": svix_timestamp,
         "svix-signature": svix_signature,
-      });
-    } catch (err: any) {
-      console.error('Error verifying webhook:', err.message);
+      }) as ClerkWebhookEvent;
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error('Error verifying webhook:', message);
       return new Response('Error verifying signature', { status: 400 });
     }
 
@@ -48,8 +59,9 @@ export async function handleClerkWebhook(request: Request, env: Env): Promise<Re
           // Clerk returns created_at as milliseconds, our schema expects a Date object because mode='timestamp'
           createdAt: evt.data.created_at ? new Date(evt.data.created_at) : new Date(),
         });
-      } catch (err: any) {
-        const errorMessage = String(err?.cause?.message ?? err?.message ?? err);
+      } catch (err: unknown) {
+        const errObj = typeof err === 'object' && err !== null ? (err as { message?: string; cause?: { message?: string }; stack?: string }) : null;
+        const errorMessage = String(errObj?.cause?.message ?? errObj?.message ?? err);
         const isOwnerConflict = errorMessage.includes('organisations.owner_id') || errorMessage.includes('org_owner_idx');
 
         if (isOwnerConflict) {
@@ -77,8 +89,8 @@ export async function handleClerkWebhook(request: Request, env: Env): Promise<Re
         }
 
         console.error('Error inserting organisation to DB:', err);
-        console.error('Error cause:', err.cause);
-        console.error('Error stack:', err.stack);
+        console.error('Error cause:', errObj?.cause);
+        console.error('Error stack:', errObj?.stack);
         Sentry.captureException(err, {
           extra: {
             orgId: evt.data.id,
