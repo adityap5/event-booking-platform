@@ -338,6 +338,65 @@ describe('Day 10: Organisation Subscription', () => {
       expect(res.sessionUrl).toBe('https://checkout.stripe.com/pay/cs_test_resub_456');
     });
 
+    it('allows createSubscriptionCheckout if organisation is incomplete_expired (reuses existing customer)', async () => {
+      const orgId = 'org-expired-resub';
+      const existingCustomerId = 'cus_existing_expired_123';
+
+      await db.insert(schema.organisations).values({
+        id: orgId,
+        name: 'Expired Org',
+        ownerId: 'owner-expired',
+        subscriptionStatus: 'incomplete_expired',
+        stripeCustomerId: existingCustomerId,
+      });
+
+      mockStripeNetworkCall({
+        id: 'cs_test_expired_resub_789',
+        url: 'https://checkout.stripe.com/pay/cs_test_expired_resub_789',
+      });
+
+      const caller = createTestCaller({
+        env: workerEnv,
+        db,
+        userId: 'owner-expired',
+        orgId,
+        role: 'organiser',
+      });
+
+      const res = await caller.createSubscriptionCheckout();
+      expect(res.sessionUrl).toBe('https://checkout.stripe.com/pay/cs_test_expired_resub_789');
+
+      // Assert existing Stripe customer was safely reused and not overwritten/re-created
+      const [org] = await db
+        .select()
+        .from(schema.organisations)
+        .where(eq(schema.organisations.id, orgId));
+      expect(org?.stripeCustomerId).toBe(existingCustomerId);
+    });
+
+    it('rejects createSubscriptionCheckout if organisation is incomplete', async () => {
+      const orgId = 'org-incomplete-checkout';
+      await db.insert(schema.organisations).values({
+        id: orgId,
+        name: 'Incomplete Org',
+        ownerId: 'owner-incomplete',
+        subscriptionStatus: 'incomplete',
+        stripeCustomerId: 'cus_existing_incomplete_456',
+      });
+
+      const caller = createTestCaller({
+        env: workerEnv,
+        db,
+        userId: 'owner-incomplete',
+        orgId,
+        role: 'organiser',
+      });
+
+      await expect(
+        caller.createSubscriptionCheckout()
+      ).rejects.toThrowError(/Organisation already has a subscription\. Manage your subscription through the Billing Portal\./);
+    });
+
     it('rejects createSubscriptionCheckout for non-organiser', async () => {
       const caller = createTestCaller({
         env: workerEnv,

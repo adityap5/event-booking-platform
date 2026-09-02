@@ -75,9 +75,14 @@ export const subscriptionsRouter = {
         });
       }
 
-      // Prevent duplicate subscriptions: only 'inactive' (never subscribed) and 'canceled' (ended)
-      // are permitted to start a new checkout. All other states must use Billing Portal.
-      if (org.subscriptionStatus !== 'inactive' && org.subscriptionStatus !== 'canceled') {
+      // Prevent duplicate subscriptions: only 'inactive' (never subscribed), 'canceled' (ended),
+      // and 'incomplete_expired' (terminal expired checkout) are permitted to start a new checkout.
+      // All other states (active, trialing, past_due, incomplete, etc.) must use Billing Portal.
+      if (
+        org.subscriptionStatus !== 'inactive' &&
+        org.subscriptionStatus !== 'canceled' &&
+        org.subscriptionStatus !== 'incomplete_expired'
+      ) {
         throw new TRPCError({
           code: 'BAD_REQUEST',
           message: 'Organisation already has a subscription. Manage your subscription through the Billing Portal.',
