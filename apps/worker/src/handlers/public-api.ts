@@ -57,6 +57,23 @@ export async function handlePublicApi(
     return jsonResponse({ error: 'Method Not Allowed' }, 405);
   }
 
+  // Extract client IP using existing project pattern
+  const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown-ip';
+
+  // Pre-authentication rate limit per client IP using RateLimiter Durable Object (300 requests / 60 seconds).
+  // Protects against SHA-256 hashing and D1 database lookup exhaustion from bursts of invalid API keys (evbk_ prefix),
+  // while allowing legitimate API clients sharing a corporate NAT/IP to fully utilize their authenticated key quota.
+  const ipRateLimiter = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(ip));
+  const { allowed: ipAllowed } = await ipRateLimiter.checkLimit('publicApiPreAuth', 300, 60_000);
+  if (!ipAllowed) {
+    logStructured({
+      category: 'rate_limit_rejection',
+      action: 'publicApiPreAuth',
+      keyType: 'ip',
+    });
+    return jsonResponse({ error: 'Too Many Requests' }, 429);
+  }
+
   // Extract and parse Authorization header
   const authHeader = request.headers.get('Authorization');
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
