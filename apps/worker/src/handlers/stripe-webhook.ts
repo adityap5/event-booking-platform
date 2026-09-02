@@ -2,7 +2,7 @@ import Stripe from 'stripe';
 import { drizzle } from 'drizzle-orm/d1';
 import * as schema from '@event-booking/shared';
 import { events } from '@event-booking/shared';
-import { eq, and, or, isNull } from 'drizzle-orm';
+import { eq, and, or, isNull, notInArray } from 'drizzle-orm';
 import { dispatchEmailConfirmation, dispatchCalendarInvite } from '../integrations.js';
 import { confirmBookingFromPayment } from '../booking-confirmation.js';
 import { generateTicketPdf } from '../ticket-pdf.js';
@@ -368,7 +368,12 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
       const db = drizzle(env.DB, { schema });
       await db.update(schema.bookings)
         .set({ status: 'cancelled' })
-        .where(eq(schema.bookings.holdId, holdId));
+        .where(
+          and(
+            eq(schema.bookings.holdId, holdId),
+            notInArray(schema.bookings.status, ['confirmed', 'refunded']),
+          ),
+        );
 
       try {
         await db.insert(schema.auditLog).values({

@@ -72,4 +72,67 @@ describe('generateTicketPdf', () => {
     const bytes = await generateTicketPdf({ ...SAMPLE_TICKET, eventDate: 0 });
     await expect(PDFDocument.load(bytes)).resolves.not.toThrow();
   });
+
+  // ── Unicode & Font Encoding Handling ─────────────────────────────────────
+
+  it('handles CJK characters in attendee and event name without throwing and produces parseable PDF', async () => {
+    const bytes = await generateTicketPdf({
+      ...SAMPLE_TICKET,
+      attendeeName: '张伟 (Zhang Wei)',
+      eventName: '北京科技峰会 2026',
+    });
+    expect(bytes).toBeInstanceOf(Uint8Array);
+    const doc = await PDFDocument.load(bytes);
+    expect(doc.getPageCount()).toBe(1);
+  });
+
+  it('handles Cyrillic characters in attendee name without throwing and produces parseable PDF', async () => {
+    const bytes = await generateTicketPdf({
+      ...SAMPLE_TICKET,
+      attendeeName: 'Алексей Иванов (Aleksei)',
+    });
+    expect(bytes).toBeInstanceOf(Uint8Array);
+    const doc = await PDFDocument.load(bytes);
+    expect(doc.getPageCount()).toBe(1);
+  });
+
+  it('handles Arabic characters in attendee name without throwing and produces parseable PDF', async () => {
+    const bytes = await generateTicketPdf({
+      ...SAMPLE_TICKET,
+      attendeeName: 'محمد بن علي (Mohammed)',
+    });
+    expect(bytes).toBeInstanceOf(Uint8Array);
+    const doc = await PDFDocument.load(bytes);
+    expect(doc.getPageCount()).toBe(1);
+  });
+
+  it('handles emoji characters in attendee name without throwing and produces parseable PDF', async () => {
+    const bytes = await generateTicketPdf({
+      ...SAMPLE_TICKET,
+      attendeeName: 'Alice 🎟️✨ Attendee',
+    });
+    expect(bytes).toBeInstanceOf(Uint8Array);
+    const doc = await PDFDocument.load(bytes);
+    expect(doc.getPageCount()).toBe(1);
+  });
+
+  it('preserves accented Western European Latin characters (WinAnsi encodable) without replacing them with ?', async () => {
+    const accentedName = 'François Müller';
+    const accentedEvent = 'Hôtel & Café Événement';
+
+    const bytes = await generateTicketPdf({
+      ...SAMPLE_TICKET,
+      attendeeName: accentedName,
+      eventName: accentedEvent,
+    });
+
+    const doc = await PDFDocument.load(bytes);
+    expect(doc.getPageCount()).toBe(1);
+
+    // Convert PDF bytes to string to verify raw text stream does not contain '?' replacements for accented chars
+    const pdfText = new TextDecoder('latin1').decode(bytes);
+    expect(pdfText).not.toContain('Fran?ois');
+    expect(pdfText).not.toContain('M?ller');
+    expect(pdfText).not.toContain('H?tel');
+  });
 });

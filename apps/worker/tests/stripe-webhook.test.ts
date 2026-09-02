@@ -210,6 +210,92 @@ describe('handleStripeWebhook HTTP handler', () => {
     expect(available).toBe(10); // all 10 back, hold fully released
   });
 
+  it('regression: stale payment_intent.payment_failed arriving after payment_intent.succeeded does NOT downgrade confirmed booking to cancelled', async () => {
+    const eventId = 'webhook-event-stale-fail';
+    const userId = 'webhook-user-stale-fail';
+    const paymentIntentId = 'pi_webhook_stale_failed_test';
+
+    await db.insert(schema.events).values({
+      id: eventId,
+      organisationId: 'org-1',
+      name: 'Stale Failed Event',
+      date: new Date(Date.now() + 86400000),
+      totalSeats: 10,
+      pricePerSeat: 1000,
+    });
+
+    await db.insert(schema.attendees).values({
+      id: 'webhook-attendee-stale-fail',
+      userId,
+      email: 'stale-fail@example.com',
+      name: 'Stale Fail Attendee',
+    });
+
+    const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+    await stub.initialize(10);
+    const hold = await stub.reserveSeat(userId, 2);
+
+    // 1. Fire payment_intent.succeeded
+    const successPayload = {
+      id: 'evt_test_success_first',
+      type: 'payment_intent.succeeded',
+      data: {
+        object: {
+          id: paymentIntentId,
+          amount_received: 2000,
+          metadata: {
+            holdId: hold.reservationId,
+            eventId,
+          },
+        },
+      },
+    };
+
+    const successReq = await createSignedRequest(successPayload);
+    const successRes = await handleStripeWebhook(successReq, workerEnv);
+    expect(successRes?.status).toBe(200);
+
+    // Verify D1 booking row is confirmed
+    const [bookingBefore] = await db
+      .select()
+      .from(schema.bookings)
+      .where(eq(schema.bookings.holdId, hold.reservationId));
+    expect(bookingBefore).toBeDefined();
+    expect(bookingBefore!.status).toBe('confirmed');
+
+    // 2. Fire stale payment_intent.payment_failed for the same hold
+    const failedPayload = {
+      id: 'evt_test_stale_failed',
+      type: 'payment_intent.payment_failed',
+      data: {
+        object: {
+          id: paymentIntentId,
+          amount_received: 0,
+          metadata: {
+            holdId: hold.reservationId,
+            eventId,
+          },
+        },
+      },
+    };
+
+    const failedReq = await createSignedRequest(failedPayload);
+    const failedRes = await handleStripeWebhook(failedReq, workerEnv);
+    expect(failedRes?.status).toBe(200);
+
+    // Critical assertion: D1 booking status must remain 'confirmed', NOT downgraded to 'cancelled'
+    const [bookingAfter] = await db
+      .select()
+      .from(schema.bookings)
+      .where(eq(schema.bookings.holdId, hold.reservationId));
+    expect(bookingAfter).toBeDefined();
+    expect(bookingAfter!.status).toBe('confirmed');
+
+    // DO hold must also remain confirmed (releaseSeat refuses to touch confirmed holds)
+    const holdAfter = await stub.getHold(hold.reservationId);
+    expect(holdAfter?.status).toBe('confirmed');
+  });
+
   // ── Day 8: PDF ticket generation ──────────────────────────────────────────
 
   it('Day 8: confirmed outcome uploads PDF to correct R2 key tickets/{bookingId}.pdf', async () => {

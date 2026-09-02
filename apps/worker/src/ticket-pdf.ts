@@ -12,7 +12,7 @@
  * with no Node.js fs/path/Buffer/canvas dependencies.
  */
 
-import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
+import { PDFDocument, StandardFonts, rgb, PDFFont } from 'pdf-lib';
 
 export interface TicketData {
   attendeeName: string;
@@ -31,18 +31,30 @@ export interface TicketData {
 const MAX_STRING_LENGTH = 120;
 
 /**
- * Strips control characters from a user-supplied string.
- * The library renders text by value, not by interpreting it as markup,
- * so there's no script-injection risk — but removing control chars prevents
- * unexpected glyph substitutions and layout breakage.
+ * Strips control characters and replaces characters that cannot be encoded
+ * by the target font (WinAnsi encoding for StandardFonts) with '?'.
+ * Values exceeding MAX_STRING_LENGTH are truncated.
  */
-function sanitize(value: string): string {
+function sanitize(value: string, font: PDFFont): string {
   // Remove all ASCII control characters (0x00–0x1F, 0x7F)
   // eslint-disable-next-line no-control-regex
   const cleaned = value.replace(/[\x00-\x1F\x7F]/g, ' ').trim();
-  return cleaned.length > MAX_STRING_LENGTH
+  const truncated = cleaned.length > MAX_STRING_LENGTH
     ? cleaned.slice(0, MAX_STRING_LENGTH) + '\u2026'
     : cleaned;
+
+  // Replace any characters not encodable by the target font with safe fallback '?'
+  let safeStr = '';
+  for (const ch of truncated) {
+    try {
+      font.widthOfTextAtSize(ch, 1);
+      safeStr += ch;
+    } catch {
+      safeStr += '?';
+    }
+  }
+
+  return safeStr;
 }
 
 /**
@@ -130,10 +142,10 @@ export async function generateTicketPdf(data: TicketData): Promise<Uint8Array> {
   let currentY = height - 100;
 
   const fields: Array<{ label: string; value: string }> = [
-    { label: 'EVENT', value: sanitize(eventName) },
-    { label: 'DATE', value: formatEventDate(eventDate) },
-    { label: 'ATTENDEE', value: sanitize(attendeeName) },
-    { label: 'SEATS', value: String(seatCount) },
+    { label: 'EVENT', value: sanitize(eventName, fontBold) },
+    { label: 'DATE', value: sanitize(formatEventDate(eventDate), fontBold) },
+    { label: 'ATTENDEE', value: sanitize(attendeeName, fontBold) },
+    { label: 'SEATS', value: sanitize(String(seatCount), fontBold) },
   ];
 
   for (const { label, value } of fields) {
@@ -186,7 +198,7 @@ export async function generateTicketPdf(data: TicketData): Promise<Uint8Array> {
     opacity: 0.7,
   });
 
-  page.drawText(sanitize(bookingId).toUpperCase(), {
+  page.drawText(sanitize(bookingId, fontRegular).toUpperCase(), {
     x: leftMargin,
     y: refY,
     size: 9,
