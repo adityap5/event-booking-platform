@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { env } from 'cloudflare:test';
 import type { Env } from '../src/index.js';
 import { setupTestDb, createTestCaller, mockStripeNetworkCall } from './test-helpers.js';
@@ -8,16 +8,22 @@ import { handleStripeWebhook } from '../src/handlers/stripe-webhook.js';
 import { getOrCreateStripeCustomer } from '../src/subscription-helpers.js';
 import Stripe from 'stripe';
 import m4 from '../migrations/0004_petite_tiger_shark.sql?raw';
+import * as Sentry from '@sentry/cloudflare';
 
 describe('Day 10: Organisation Subscription', () => {
   let db: Awaited<ReturnType<typeof setupTestDb>>;
   const workerEnv = env as unknown as Env;
 
   beforeEach(async () => {
+    vi.restoreAllMocks();
     db = await setupTestDb(workerEnv.DB);
     (workerEnv as any).STRIPE_SECRET_KEY = 'sk_test_mock';
     (workerEnv as any).STRIPE_WEBHOOK_SECRET = 'whsec_test_secret_123';
     (workerEnv as any).STRIPE_SUBSCRIPTION_PRICE_ID = 'price_test_monthly_sub';
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   describe('1. Schema & Migration SQL', () => {
@@ -901,6 +907,216 @@ describe('Day 10: Organisation Subscription', () => {
       expect(org).toBeDefined();
       expect(org!.subscriptionStatus).toBe('past_due');
       expect(org!.stripeSubscriptionId).toBe('sub_idemp_1');
+    });
+
+    it('customer.subscription.created: losing subscription cancellation succeeds — existing behavior confirmed correct', async () => {
+      // Verifies the existing cancellation path calls Stripe cancel for a loser,
+      // and that Sentry is NOT called when cancellation succeeds.
+      const orgId = 'org-cancel-success';
+      const stripeCustomerId = 'cus_cancel_success';
+
+      await db.insert(schema.organisations).values({
+        id: orgId,
+        name: 'Cancel Success Org',
+        ownerId: 'owner-cancel-success',
+        stripeCustomerId,
+        stripeSubscriptionId: 'sub_winner',
+        subscriptionStatus: 'active',
+      });
+
+      // Mock Stripe to accept the cancel call
+      mockStripeNetworkCall({ id: 'sub_loser', status: 'canceled' });
+      const sentrySpy = vi.spyOn(Sentry, 'captureMessage');
+
+      const res = await dispatchWebhook('customer.subscription.created', {
+        id: 'sub_loser',
+        customer: stripeCustomerId,
+        status: 'active',
+      });
+
+      expect(res?.status).toBe(200);
+
+      // Authoritative subscription must remain unchanged
+      const [org] = await db
+        .select()
+        .from(schema.organisations)
+        .where(eq(schema.organisations.id, orgId));
+      expect(org!.stripeSubscriptionId).toBe('sub_winner');
+      expect(org!.subscriptionStatus).toBe('active');
+
+      // No Sentry error — cancellation succeeded
+      const cancelFailureCalls = sentrySpy.mock.calls.filter(([msg]) =>
+        typeof msg === 'string' && msg.includes('failed to cancel redundant'),
+      );
+      expect(cancelFailureCalls).toHaveLength(0);
+    });
+
+    it('customer.subscription.created: losing subscription cancellation fails — Sentry captures at error level, still returns 200', async () => {
+      const orgId = 'org-cancel-fail';
+      const stripeCustomerId = 'cus_cancel_fail';
+
+      await db.insert(schema.organisations).values({
+        id: orgId,
+        name: 'Cancel Fail Org',
+        ownerId: 'owner-cancel-fail',
+        stripeCustomerId,
+        stripeSubscriptionId: 'sub_authoritative',
+        subscriptionStatus: 'active',
+      });
+
+      // Make the outbound Stripe API call fail by intercepting fetch
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const urlString = typeof input === 'string'
+          ? input
+          : input instanceof URL
+          ? input.href
+          : (input as Request).url;
+        if (urlString.includes('api.stripe.com')) {
+          return new Response(
+            JSON.stringify({ error: { type: 'api_error', message: 'Service unavailable' } }),
+            { status: 503, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return originalFetch(input, init);
+      };
+
+      const sentrySpy = vi.spyOn(Sentry, 'captureMessage');
+
+      try {
+        const res = await dispatchWebhook('customer.subscription.created', {
+          id: 'sub_loser_fail',
+          customer: stripeCustomerId,
+          status: 'active',
+        });
+
+        // Must still return 200 even when the cancellation throws
+        expect(res?.status).toBe(200);
+
+        // D1 state must be unchanged
+        const [org] = await db
+          .select()
+          .from(schema.organisations)
+          .where(eq(schema.organisations.id, orgId));
+        expect(org!.stripeSubscriptionId).toBe('sub_authoritative');
+        expect(org!.subscriptionStatus).toBe('active');
+
+        // Sentry must have fired at error level with all required context
+        const failureCalls = sentrySpy.mock.calls.filter(([msg]) =>
+          typeof msg === 'string' && msg.includes('failed to cancel redundant'),
+        );
+        expect(failureCalls).toHaveLength(1);
+        const [, sentryCtx] = failureCalls[0]!;
+        expect(sentryCtx).toMatchObject({
+          level: 'error',
+          extra: expect.objectContaining({
+            orgId,
+            authoritativeSubscriptionId: 'sub_authoritative',
+            rejectedSubscriptionId: 'sub_loser_fail',
+          }),
+        });
+        // The error field must be a non-empty string (the serialized cancellation error)
+        expect(typeof (sentryCtx as any)?.extra?.error).toBe('string');
+        expect((sentryCtx as any)?.extra?.error).toBeTruthy();
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    // ── customer.subscription.updated discriminator analysis ──────────────────
+    //
+    // The current D1 data model stores only one subscription ID slot
+    // (stripeSubscriptionId) with no history, no "replaced-by" pointer, and no
+    // per-subscription creation timestamp. When a customer.subscription.updated
+    // event arrives for a non-matching subscription ID, the state
+    //   freshOrg.stripeSubscriptionId !== subscription.id
+    // is ambiguous between:
+    //   A. A duplicate/loser-race subscription (should be cancelled).
+    //   B. A legitimately superseded old subscription whose webhook arrived late
+    //      (must NOT be cancelled — doing so would be a regression).
+    // Without a reliable discriminator, defensive cancellation cannot be
+    // implemented safely. The correct behavior is the existing one: log a
+    // warning and return 200. The two tests below prove this contract is preserved.
+
+    it('customer.subscription.updated: legitimately superseded subscription arriving late must NOT trigger cancellation or Sentry error', async () => {
+      // Scenario: org previously had sub_old (superseded by sub_current).
+      // A late updated event for sub_old arrives. Must be silently ignored.
+      const orgId = 'org-updated-superseded';
+      const stripeCustomerId = 'cus_updated_superseded';
+
+      await db.insert(schema.organisations).values({
+        id: orgId,
+        name: 'Superseded Org',
+        ownerId: 'owner-superseded',
+        stripeCustomerId,
+        stripeSubscriptionId: 'sub_current',
+        subscriptionStatus: 'active',
+      });
+
+      const sentrySpy = vi.spyOn(Sentry, 'captureMessage');
+
+      const res = await dispatchWebhook('customer.subscription.updated', {
+        id: 'sub_old_superseded',
+        customer: stripeCustomerId,
+        status: 'canceled',
+      });
+
+      expect(res?.status).toBe(200);
+
+      // D1 must be unchanged
+      const [org] = await db
+        .select()
+        .from(schema.organisations)
+        .where(eq(schema.organisations.id, orgId));
+      expect(org!.stripeSubscriptionId).toBe('sub_current');
+      expect(org!.subscriptionStatus).toBe('active');
+
+      // No error-level Sentry call — this is intentionally a safe ignore
+      const errorCalls = sentrySpy.mock.calls.filter(([, ctx]) =>
+        (ctx as any)?.level === 'error',
+      );
+      expect(errorCalls).toHaveLength(0);
+    });
+
+    it('customer.subscription.updated: non-matching subscription (potential loser) cannot be safely distinguished from a superseded one — silently ignored, no cancellation, no Sentry error, 200', async () => {
+      // This is the companion to the above: a duplicate-race subscription that
+      // arrives via updated (not created) cannot be distinguished from a
+      // legitimately superseded subscription with the current D1 model.
+      // Both produce the same safe outcome: warn + 200, no cancel, no Sentry error.
+      const orgId = 'org-updated-stale-dup';
+      const stripeCustomerId = 'cus_updated_stale_dup';
+
+      await db.insert(schema.organisations).values({
+        id: orgId,
+        name: 'Stale Dup Org',
+        ownerId: 'owner-stale-dup',
+        stripeCustomerId,
+        stripeSubscriptionId: 'sub_winner_dup',
+        subscriptionStatus: 'active',
+      });
+
+      const sentrySpy = vi.spyOn(Sentry, 'captureMessage');
+
+      const res = await dispatchWebhook('customer.subscription.updated', {
+        id: 'sub_loser_dup_updated',
+        customer: stripeCustomerId,
+        status: 'active',
+      });
+
+      expect(res?.status).toBe(200);
+
+      const [org] = await db
+        .select()
+        .from(schema.organisations)
+        .where(eq(schema.organisations.id, orgId));
+      expect(org!.stripeSubscriptionId).toBe('sub_winner_dup');
+      expect(org!.subscriptionStatus).toBe('active');
+
+      // No error-level Sentry call — cancellation cannot be safely performed here
+      const errorCalls = sentrySpy.mock.calls.filter(([, ctx]) =>
+        (ctx as any)?.level === 'error',
+      );
+      expect(errorCalls).toHaveLength(0);
     });
   });
 

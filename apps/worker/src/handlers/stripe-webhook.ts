@@ -466,6 +466,15 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
         await stripeClient.subscriptions.cancel(subscription.id);
       } catch (cancelErr) {
         console.error('Failed to cancel redundant secondary subscription on Stripe:', cancelErr);
+        Sentry.captureMessage('customer.subscription.created: failed to cancel redundant secondary subscription', {
+          level: 'error',
+          extra: {
+            orgId: org.id,
+            authoritativeSubscriptionId: freshOrg?.stripeSubscriptionId,
+            rejectedSubscriptionId: subscription.id,
+            error: cancelErr instanceof Error ? cancelErr.message : String(cancelErr),
+          },
+        });
       }
 
       return new Response('', { status: 200 });
