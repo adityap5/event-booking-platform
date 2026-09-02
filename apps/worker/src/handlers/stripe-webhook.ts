@@ -80,7 +80,54 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
           return new Response('', { status: 200 });
 
         case 'already_confirmed':
-          console.warn('payment_intent.succeeded: HOLD_ALREADY_USED — already confirmed, idempotent', { holdId, eventId });
+          console.warn('payment_intent.succeeded: HOLD_ALREADY_USED — same PaymentIntent redelivered, idempotent', { holdId, eventId });
+          return new Response('', { status: 200 });
+
+        case 'duplicate_payment_for_confirmed_hold':
+          // A genuinely different PaymentIntent succeeded for a hold that is already
+          // confirmed. Real money was captured with no corresponding booking.
+          // Do NOT auto-refund here — that requires deliberate, isolated handling
+          // matching the refundBooking path. Alert loudly so a human can act.
+          console.error('payment_intent.succeeded: DUPLICATE PAYMENT — different PaymentIntent for already-confirmed hold', {
+            holdId,
+            eventId,
+            incomingPaymentIntentId: result.incomingPaymentIntentId,
+            existingPaymentIntentId: result.existingPaymentIntentId,
+          });
+          Sentry.captureMessage('payment_intent.succeeded: DUPLICATE PAYMENT — different PaymentIntent captured for already-confirmed hold', {
+            level: 'error',
+            extra: {
+              holdId,
+              eventId,
+              incomingPaymentIntentId: result.incomingPaymentIntentId,
+              existingPaymentIntentId: result.existingPaymentIntentId,
+            },
+          });
+          // Write audit row so a human reviewing the log has the conflicting IDs.
+          // Failure is fully isolated — audit write errors must not affect the HTTP
+          // response, per this codebase's established audit-isolation pattern.
+          try {
+            await db.insert(schema.auditLog).values({
+              eventType: 'duplicate_payment_captured',
+              holdId,
+              bookingEventId: eventId,
+              detail: JSON.stringify({
+                incomingPaymentIntentId: result.incomingPaymentIntentId,
+                existingPaymentIntentId: result.existingPaymentIntentId,
+              }),
+            });
+          } catch (auditErr: unknown) {
+            console.error('Failed to write audit_log for duplicate_payment_captured:', auditErr);
+            Sentry.captureMessage('Failed to write audit_log for duplicate_payment_captured', {
+              level: 'warning',
+              extra: {
+                holdId,
+                eventId,
+                incomingPaymentIntentId: result.incomingPaymentIntentId,
+                error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+              },
+            });
+          }
           return new Response('', { status: 200 });
 
         case 'hold_expired':

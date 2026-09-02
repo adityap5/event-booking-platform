@@ -31,10 +31,12 @@ export type ConfirmBookingFromPaymentResult =
       attendee: typeof schema.attendees.$inferSelect;
       seatCount: number;
     }
-  // A booking row already exists for this holdId — genuine idempotent replay
+  // A booking row already exists for this holdId AND its stored
+  // stripePaymentIntentId matches the incoming one — genuine idempotent replay
   // (Stripe re-sent a webhook we've already fully processed). Verified by
-  // querying D1, not assumed from the DO's HOLD_ALREADY_USED alone — see
-  // 'orphaned_hold' below for why that distinction matters.
+  // querying D1 and comparing PaymentIntent IDs, not assumed from the DO's
+  // HOLD_ALREADY_USED alone — see 'orphaned_hold' and
+  // 'duplicate_payment_for_confirmed_hold' below for why those distinctions matter.
   | { outcome: 'already_confirmed' }
   | { outcome: 'hold_not_found' }
   // Hold expired between checkout and webhook delivery; the DO hold has been released.
@@ -65,7 +67,20 @@ export type ConfirmBookingFromPaymentResult =
   // listConfirmedHolds() exist on the DO, automated self-healing is intentionally
   // deferred; orphaned holds are surfaced loudly and caught by the Day 7
   // periodic reconciliation job (using listConfirmedHolds()) for alerting and manual intervention.
-  | { outcome: 'orphaned_hold'; holdId: string; eventId: string };
+  | { outcome: 'orphaned_hold'; holdId: string; eventId: string }
+  // A booking row exists for this holdId, but its stored stripePaymentIntentId
+  // does NOT match the incoming one. This means a genuinely different, already-
+  // captured PaymentIntent has arrived for a hold that is already confirmed —
+  // real money moved with no corresponding new booking. The caller is
+  // responsible for alerting loudly (Sentry) and writing an audit row so a
+  // human can issue a manual refund. No automatic refund is attempted here.
+  | {
+      outcome: 'duplicate_payment_for_confirmed_hold';
+      incomingPaymentIntentId: string;
+      existingPaymentIntentId: string | null;
+      holdId: string;
+      eventId: string;
+    };
 
 
 
@@ -118,17 +133,36 @@ export async function confirmBookingFromPayment(
 
     if (message === 'HOLD_ALREADY_USED') {
       // Do NOT assume this means "already confirmed" — verify a booking
-      // actually exists. See the 'orphaned_hold' / 'already_confirmed'
-      // doc comments above for why this distinction is load-bearing.
+      // actually exists, and if so, distinguish a true idempotent replay
+      // (same PaymentIntent re-delivered) from a genuine double-charge
+      // (a different PaymentIntent also succeeded for this hold).
+      // See the 'orphaned_hold' / 'already_confirmed' /
+      // 'duplicate_payment_for_confirmed_hold' doc comments above.
       const [existingBooking] = await db
-        .select()
+        .select({ stripePaymentIntentId: schema.bookings.stripePaymentIntentId })
         .from(schema.bookings)
         .where(eq(schema.bookings.holdId, holdId));
 
-      if (existingBooking) {
+      if (!existingBooking) {
+        return { outcome: 'orphaned_hold', holdId, eventId };
+      }
+
+      // Same PaymentIntent delivered again → safe idempotent replay.
+      if (existingBooking.stripePaymentIntentId === stripePaymentIntentId) {
         return { outcome: 'already_confirmed' };
       }
-      return { outcome: 'orphaned_hold', holdId, eventId };
+
+      // Different PaymentIntent (or stored value is null, which is anomalous
+      // for a confirmed Stripe booking) → genuine double-charge scenario.
+      // The caller is responsible for alerting and writing an audit row.
+      // The existing booking is intentionally left unchanged.
+      return {
+        outcome: 'duplicate_payment_for_confirmed_hold',
+        incomingPaymentIntentId: stripePaymentIntentId,
+        existingPaymentIntentId: existingBooking.stripePaymentIntentId,
+        holdId,
+        eventId,
+      };
     }
 
     if (message === 'HOLD_EXPIRED') {

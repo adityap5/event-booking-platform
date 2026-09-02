@@ -325,4 +325,127 @@ describe('confirmBookingFromPayment outcome coverage', () => {
       expect(result.eventId).toBe(eventId);
     }
   });
+
+  it('9. outcome: duplicate_payment_for_confirmed_hold — different PaymentIntent for same already-confirmed holdId', async () => {
+    const eventId = 'bc-event-dup-payment';
+    const userId = 'bc-user-dup-payment';
+    const pricePerSeat = 2000;
+
+    await db.insert(schema.events).values({
+      id: eventId,
+      organisationId: 'org-1',
+      name: 'Duplicate Payment Event',
+      date: new Date(Date.now() + 86400000),
+      totalSeats: 10,
+      pricePerSeat,
+    });
+
+    await db.insert(schema.attendees).values({
+      id: 'attendee-dup-payment',
+      userId,
+      email: 'dup-payment@example.com',
+      name: 'Dup Payment Attendee',
+    });
+
+    const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+    await stub.initialize(10);
+    const hold = await stub.reserveSeat(userId, 2);
+
+    // First payment confirms the hold and creates the booking.
+    const firstResult = await confirmBookingFromPayment({
+      db,
+      seatLedger: stub,
+      holdId: hold.reservationId,
+      eventId,
+      stripePaymentIntentId: 'pi_first_123',
+      amountReceivedPence: pricePerSeat * 2,
+    });
+    expect(firstResult.outcome).toBe('confirmed');
+
+    // Second payment: genuinely different PaymentIntent for the same holdId.
+    const secondResult = await confirmBookingFromPayment({
+      db,
+      seatLedger: stub,
+      holdId: hold.reservationId,
+      eventId,
+      stripePaymentIntentId: 'pi_second_456',
+      amountReceivedPence: pricePerSeat * 2,
+    });
+
+    expect(secondResult.outcome).toBe('duplicate_payment_for_confirmed_hold');
+    if (secondResult.outcome === 'duplicate_payment_for_confirmed_hold') {
+      expect(secondResult.incomingPaymentIntentId).toBe('pi_second_456');
+      expect(secondResult.existingPaymentIntentId).toBe('pi_first_123');
+      expect(secondResult.holdId).toBe(hold.reservationId);
+      expect(secondResult.eventId).toBe(eventId);
+    }
+
+    // The booking must remain linked to the FIRST PaymentIntent, unchanged.
+    const [bookingRow] = await db
+      .select({ stripePaymentIntentId: schema.bookings.stripePaymentIntentId })
+      .from(schema.bookings)
+      .where(eq(schema.bookings.holdId, hold.reservationId));
+    expect(bookingRow).toBeDefined();
+    expect(bookingRow?.stripePaymentIntentId).toBe('pi_first_123');
+
+    // The existing hold must remain 'confirmed' in the DO — duplicate-payment
+    // handling must not modify the DO seat state.
+    const holdAfter = await stub.getHold(hold.reservationId);
+    expect(holdAfter?.status).toBe('confirmed');
+  });
+
+  it('10. regression: same PaymentIntent delivered twice (different Stripe event ID) must remain already_confirmed', async () => {
+    // This test explicitly uses a different Stripe event ID but the same
+    // PaymentIntent ID to prove the redelivery path is not broken by the fix.
+    // Using a different event ID avoids any event-level deduplication that could
+    // intercept the second delivery before confirmBookingFromPayment is reached.
+    const eventId = 'bc-event-redelivery';
+    const userId = 'bc-user-redelivery';
+    const pricePerSeat = 1500;
+
+    await db.insert(schema.events).values({
+      id: eventId,
+      organisationId: 'org-1',
+      name: 'Redelivery Regression Event',
+      date: new Date(Date.now() + 86400000),
+      totalSeats: 10,
+      pricePerSeat,
+    });
+
+    await db.insert(schema.attendees).values({
+      id: 'attendee-redelivery',
+      userId,
+      email: 'redelivery@example.com',
+      name: 'Redelivery Attendee',
+    });
+
+    const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+    await stub.initialize(10);
+    const hold = await stub.reserveSeat(userId, 1);
+
+    // Webhook/Event A: first delivery — confirms the hold, stores pi_same_123.
+    const firstResult = await confirmBookingFromPayment({
+      db,
+      seatLedger: stub,
+      holdId: hold.reservationId,
+      eventId,
+      stripePaymentIntentId: 'pi_same_123',
+      amountReceivedPence: pricePerSeat,
+    });
+    expect(firstResult.outcome).toBe('confirmed');
+
+    // Webhook/Event B: DIFFERENT Stripe event ID, but the SAME PaymentIntent ID.
+    // This is the true redelivery case — must remain silent already_confirmed.
+    const secondResult = await confirmBookingFromPayment({
+      db,
+      seatLedger: stub,
+      holdId: hold.reservationId,
+      eventId,
+      stripePaymentIntentId: 'pi_same_123', // Same PI, different Stripe event
+      amountReceivedPence: pricePerSeat,
+    });
+
+    // Must NOT become duplicate_payment_for_confirmed_hold.
+    expect(secondResult.outcome).toBe('already_confirmed');
+  });
 });

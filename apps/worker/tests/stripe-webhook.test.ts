@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { env, runInDurableObject } from 'cloudflare:test';
 import type { Env } from '../src/index.js';
 import { setupTestDb } from './test-helpers.js';
@@ -7,6 +7,7 @@ import Stripe from 'stripe';
 import * as schema from '@event-booking/shared';
 import { eq } from 'drizzle-orm';
 import type { SeatLedger } from '../src/seat-ledger.js';
+import * as Sentry from '@sentry/cloudflare';
 
 describe('handleStripeWebhook HTTP handler', () => {
   let db: Awaited<ReturnType<typeof setupTestDb>>;
@@ -19,9 +20,14 @@ describe('handleStripeWebhook HTTP handler', () => {
   });
 
   beforeEach(async () => {
+    vi.restoreAllMocks();
     db = await setupTestDb(workerEnv.DB);
     (workerEnv as any).STRIPE_SECRET_KEY = stripeSecretKey;
     (workerEnv as any).STRIPE_WEBHOOK_SECRET = webhookSecret;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   async function createSignedRequest(payload: object, secret: string = webhookSecret): Promise<Request> {
@@ -393,5 +399,191 @@ describe('handleStripeWebhook HTTP handler', () => {
     expect(page).toBeDefined();
     expect(page!.getWidth()).toBeGreaterThan(0);
     expect(page!.getHeight()).toBeGreaterThan(0);
+  });
+
+  // ── Double-charge detection ───────────────────────────────────────────────
+
+  it('duplicate payment: different PaymentIntent for same holdId → Sentry error, audit_log row, 200, hold stays confirmed', async () => {
+    const eventId = 'webhook-event-dup-pay';
+    const userId = 'webhook-user-dup-pay';
+
+    await db.insert(schema.events).values({
+      id: eventId,
+      organisationId: 'org-1',
+      name: 'Duplicate Payment Webhook Event',
+      date: new Date(Date.now() + 86400000),
+      totalSeats: 10,
+      pricePerSeat: 1000,
+    });
+
+    await db.insert(schema.attendees).values({
+      id: 'attendee-dup-pay',
+      userId,
+      email: 'dup-pay@example.com',
+      name: 'Dup Pay Attendee',
+    });
+
+    const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+    await stub.initialize(10);
+    const hold = await stub.reserveSeat(userId, 1);
+
+    // Webhook/Event A: first PaymentIntent confirms the hold.
+    const payloadA = {
+      id: 'evt_dup_pay_A',
+      type: 'payment_intent.succeeded',
+      data: {
+        object: {
+          id: 'pi_first_123',
+          amount_received: 1000,
+          metadata: { holdId: hold.reservationId, eventId },
+        },
+      },
+    };
+    const reqA = await createSignedRequest(payloadA);
+    const resA = await handleStripeWebhook(reqA, workerEnv);
+    expect(resA?.status).toBe(200);
+
+    // Verify booking was created and linked to first PI.
+    const [bookingBefore] = await db
+      .select({ id: schema.bookings.id, stripePaymentIntentId: schema.bookings.stripePaymentIntentId })
+      .from(schema.bookings)
+      .where(eq(schema.bookings.holdId, hold.reservationId));
+    expect(bookingBefore).toBeDefined();
+    expect(bookingBefore?.stripePaymentIntentId).toBe('pi_first_123');
+
+    // Spy on Sentry BEFORE the second webhook to capture calls from it only.
+    const sentrySpy = vi.spyOn(Sentry, 'captureMessage');
+
+    // Webhook/Event B: genuinely different PaymentIntent, same holdId.
+    const payloadB = {
+      id: 'evt_dup_pay_B',
+      type: 'payment_intent.succeeded',
+      data: {
+        object: {
+          id: 'pi_second_456',
+          amount_received: 1000,
+          metadata: { holdId: hold.reservationId, eventId },
+        },
+      },
+    };
+    const reqB = await createSignedRequest(payloadB);
+    const resB = await handleStripeWebhook(reqB, workerEnv);
+
+    // Must still return 200 — the webhook was processed correctly.
+    expect(resB?.status).toBe(200);
+
+    // Booking must remain linked to the FIRST PaymentIntent.
+    const [bookingAfter] = await db
+      .select({ stripePaymentIntentId: schema.bookings.stripePaymentIntentId })
+      .from(schema.bookings)
+      .where(eq(schema.bookings.holdId, hold.reservationId));
+    expect(bookingAfter?.stripePaymentIntentId).toBe('pi_first_123');
+
+    // Sentry must have fired with the duplicate-payment message at error level.
+    expect(sentrySpy).toHaveBeenCalledWith(
+      expect.stringContaining('DUPLICATE PAYMENT'),
+      expect.objectContaining({
+        level: 'error',
+        extra: expect.objectContaining({
+          incomingPaymentIntentId: 'pi_second_456',
+          existingPaymentIntentId: 'pi_first_123',
+        }),
+      }),
+    );
+
+    // An audit_log row must exist recording the duplicate capture.
+    const auditRows = await db
+      .select({ eventType: schema.auditLog.eventType, detail: schema.auditLog.detail })
+      .from(schema.auditLog)
+      .where(eq(schema.auditLog.eventType, 'duplicate_payment_captured'));
+    expect(auditRows.length).toBe(1);
+    const detail = JSON.parse(auditRows[0]!.detail ?? '{}');
+    expect(detail.incomingPaymentIntentId).toBe('pi_second_456');
+    expect(detail.existingPaymentIntentId).toBe('pi_first_123');
+
+    // The existing hold must remain 'confirmed' — duplicate-payment handling
+    // must not modify the DO seat state.
+    const holdAfter = await stub.getHold(hold.reservationId);
+    expect(holdAfter?.status).toBe('confirmed');
+  });
+
+  it('true redelivery: same PaymentIntent, different Stripe event ID → 200, no duplicate Sentry alert, no duplicate audit row', async () => {
+    // This test explicitly uses different Stripe event IDs (evt_redeliv_A vs
+    // evt_redeliv_B) but the SAME PaymentIntent ID to prove the redelivery
+    // path is not affected by the fix. Using different Stripe event IDs avoids
+    // any event-level deduplication that could intercept the second delivery
+    // before confirmBookingFromPayment is reached.
+    const eventId = 'webhook-event-redeliv';
+    const userId = 'webhook-user-redeliv';
+
+    await db.insert(schema.events).values({
+      id: eventId,
+      organisationId: 'org-1',
+      name: 'True Redelivery Webhook Event',
+      date: new Date(Date.now() + 86400000),
+      totalSeats: 10,
+      pricePerSeat: 1000,
+    });
+
+    await db.insert(schema.attendees).values({
+      id: 'attendee-redeliv',
+      userId,
+      email: 'redeliv@example.com',
+      name: 'Redeliv Attendee',
+    });
+
+    const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+    await stub.initialize(10);
+    const hold = await stub.reserveSeat(userId, 1);
+
+    // Webhook/Event A: first delivery — confirms hold, stores pi_same_123.
+    const payloadA = {
+      id: 'evt_redeliv_A',
+      type: 'payment_intent.succeeded',
+      data: {
+        object: {
+          id: 'pi_same_123',
+          amount_received: 1000,
+          metadata: { holdId: hold.reservationId, eventId },
+        },
+      },
+    };
+    const reqA = await createSignedRequest(payloadA);
+    const resA = await handleStripeWebhook(reqA, workerEnv);
+    expect(resA?.status).toBe(200);
+
+    // Spy BEFORE the second webhook.
+    const sentrySpy = vi.spyOn(Sentry, 'captureMessage');
+
+    // Webhook/Event B: DIFFERENT Stripe event ID, same PaymentIntent ID.
+    const payloadB = {
+      id: 'evt_redeliv_B',
+      type: 'payment_intent.succeeded',
+      data: {
+        object: {
+          id: 'pi_same_123', // Same PI as Event A
+          amount_received: 1000,
+          metadata: { holdId: hold.reservationId, eventId },
+        },
+      },
+    };
+    const reqB = await createSignedRequest(payloadB);
+    const resB = await handleStripeWebhook(reqB, workerEnv);
+
+    // Must return 200 silently.
+    expect(resB?.status).toBe(200);
+
+    // Sentry must NOT have fired any duplicate-payment message.
+    const duplicateCalls = sentrySpy.mock.calls.filter(([msg]) =>
+      typeof msg === 'string' && msg.includes('DUPLICATE PAYMENT'),
+    );
+    expect(duplicateCalls).toHaveLength(0);
+
+    // No duplicate_payment_captured audit row must exist.
+    const auditRows = await db
+      .select()
+      .from(schema.auditLog)
+      .where(eq(schema.auditLog.eventType, 'duplicate_payment_captured'));
+    expect(auditRows).toHaveLength(0);
   });
 });

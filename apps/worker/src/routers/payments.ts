@@ -68,31 +68,41 @@ export const paymentsRouter = {
       // seatCount is derived from the hold, never accepted from the client — see CRITICAL_FINDINGS.md.
       const seatCount = hold.seatCount;
 
-      const session = await stripe.checkout.sessions.create({
-        mode: 'payment',
-        line_items: [
-          {
-            price_data: {
-              currency: 'gbp',
-              unit_amount: event.pricePerSeat,
-              product_data: {
-                name: event.name,
-                description: `${seatCount} seat(s) for ${event.name}`,
+      // Application-level idempotency key derived from the immutable holdId.
+      // Ensures that rapid double-clicks or retries within Stripe's 24-hour
+      // idempotency window receive the same Checkout Session rather than
+      // creating a second independent PaymentIntent for the same hold.
+      // Pattern follows createSubscriptionCheckout in subscriptions.ts.
+      const idempotencyKey = `checkout_${input.holdId}`;
+
+      const session = await stripe.checkout.sessions.create(
+        {
+          mode: 'payment',
+          line_items: [
+            {
+              price_data: {
+                currency: 'gbp',
+                unit_amount: event.pricePerSeat,
+                product_data: {
+                  name: event.name,
+                  description: `${seatCount} seat(s) for ${event.name}`,
+                },
               },
+              quantity: seatCount,
             },
-            quantity: seatCount,
+          ],
+          payment_intent_data: {
+            metadata: {
+              holdId: input.holdId,
+              eventId: input.eventId,
+              userId: ctx.userId,
+            },
           },
-        ],
-        payment_intent_data: {
-          metadata: {
-            holdId: input.holdId,
-            eventId: input.eventId,
-            userId: ctx.userId,
-          },
+          success_url: `${ctx.env.WEB_APP_URL}/booking/success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${ctx.env.WEB_APP_URL}/booking/cancelled?holdId=${encodeURIComponent(input.holdId)}&eventId=${encodeURIComponent(input.eventId)}`,
         },
-        success_url: `${ctx.env.WEB_APP_URL}/booking/success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${ctx.env.WEB_APP_URL}/booking/cancelled?holdId=${encodeURIComponent(input.holdId)}&eventId=${encodeURIComponent(input.eventId)}`,
-      });
+        { idempotencyKey },
+      );
 
       return { sessionUrl: session.url };
     }),
