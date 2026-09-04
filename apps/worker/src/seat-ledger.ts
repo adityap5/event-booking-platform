@@ -16,9 +16,16 @@ class SeatLedgerBase extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS event_state (
         id INTEGER PRIMARY KEY,
         total_seats INTEGER NOT NULL,
-        initialized INTEGER NOT NULL
+        initialized INTEGER NOT NULL,
+        pruned_seats INTEGER NOT NULL DEFAULT 0
       );
     `);
+
+    try {
+      this.ctx.storage.sql.exec("ALTER TABLE event_state ADD COLUMN pruned_seats INTEGER NOT NULL DEFAULT 0");
+    } catch {
+      // Column already exists
+    }
     
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS reservations (
@@ -64,20 +71,21 @@ class SeatLedgerBase extends DurableObject<Env> {
     }
     
     this.ctx.storage.sql.exec(
-      "INSERT INTO event_state (id, total_seats, initialized) VALUES (1, ?, 1) ON CONFLICT(id) DO NOTHING",
+      "INSERT INTO event_state (id, total_seats, initialized, pruned_seats) VALUES (1, ?, 1, 0) ON CONFLICT(id) DO NOTHING",
       totalSeats
     );
   }
 
   getAvailableSeats() {
-    const state = this.ctx.storage.sql.exec("SELECT total_seats, initialized FROM event_state WHERE id = 1").toArray();
+    const state = this.ctx.storage.sql.exec("SELECT total_seats, initialized, COALESCE(pruned_seats, 0) as pruned_seats FROM event_state WHERE id = 1").toArray();
     if (state.length === 0 || state[0]!.initialized !== 1) {
       return null; // Signals to the worker that it needs to fetch from D1 and initialize
     }
     const totalSeats = state[0]!.total_seats as number;
+    const prunedSeats = (state[0]!.pruned_seats as number) || 0;
 
     const used = this.ctx.storage.sql.exec("SELECT SUM(seat_count) as used_seats FROM reservations WHERE status = 'pending' OR status = 'confirmed'").toArray();
-    const usedSeats = (used[0]!.used_seats as number) || 0;
+    const usedSeats = ((used[0]!.used_seats as number) || 0) + prunedSeats;
 
     return totalSeats - usedSeats;
   }
@@ -90,7 +98,7 @@ class SeatLedgerBase extends DurableObject<Env> {
     // =========================================================================
     // START SYNCHRONOUS BLOCK
     // =========================================================================
-    const state = this.ctx.storage.sql.exec("SELECT total_seats FROM event_state WHERE id = 1").toArray();
+    const state = this.ctx.storage.sql.exec("SELECT total_seats, COALESCE(pruned_seats, 0) as pruned_seats FROM event_state WHERE id = 1").toArray();
     if (state.length === 0) {
       throw new Error("Event not initialized");
     }
@@ -117,9 +125,10 @@ class SeatLedgerBase extends DurableObject<Env> {
     }
 
     const totalSeats = state[0]!.total_seats as number;
+    const prunedSeats = (state[0]!.pruned_seats as number) || 0;
 
     const used = this.ctx.storage.sql.exec("SELECT SUM(seat_count) as used_seats FROM reservations WHERE status = 'pending' OR status = 'confirmed'").toArray();
-    const usedSeats = (used[0]!.used_seats as number) || 0;
+    const usedSeats = ((used[0]!.used_seats as number) || 0) + prunedSeats;
 
     const available = totalSeats - usedSeats;
 
@@ -208,6 +217,13 @@ class SeatLedgerBase extends DurableObject<Env> {
 
     this.broadcastSeatCount();
 
+    // Schedule pruning alarm for 7 days past hold expiry if no alarm is scheduled or if pruneAt is earlier
+    const pruneAt = (hold.expires_at as number) + 7 * 24 * 60 * 60 * 1000;
+    const currentAlarm = await this.ctx.storage.getAlarm();
+    if (currentAlarm === null || pruneAt < currentAlarm) {
+      await this.ctx.storage.setAlarm(pruneAt);
+    }
+
     return {
       userId: hold.user_id as string,
       seatCount: hold.seat_count as number,
@@ -292,21 +308,70 @@ class SeatLedgerBase extends DurableObject<Env> {
     }
   }
 
+  /**
+   * Pruning step that permanently deletes confirmed hold rows older than the 7-day cutoff.
+   *
+   * Reconciliation window derivation:
+   * - Holds expire within 15 minutes of reservation; confirmation occurs during this lifecycle.
+   * - The reconciliation cron runs every 5 minutes and only inspects holds past their expiry.
+   * - A hold confirmed > 7 days ago has undergone over 2,016 reconciliation sweeps.
+   * - Pruning deleted rows frees unbounded SQLite storage growth while updating event_state.pruned_seats
+   *   to ensure availability math (totalSeats - usedSeats) is strictly preserved without overselling.
+   */
+  async pruneConfirmedHolds(cutoff?: number): Promise<number> {
+    const threshold = cutoff ?? (Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+    const stats = this.ctx.storage.sql.exec(
+      "SELECT COUNT(*) as count, SUM(seat_count) as pruned_seats FROM reservations WHERE status = 'confirmed' AND expires_at <= ?",
+      threshold
+    ).toArray();
+    const count = (stats[0]?.count as number) || 0;
+    const prunedSeats = (stats[0]?.pruned_seats as number) || 0;
+
+    if (count > 0) {
+      this.ctx.storage.sql.exec(
+        "DELETE FROM reservations WHERE status = 'confirmed' AND expires_at <= ?",
+        threshold
+      );
+      this.ctx.storage.sql.exec(
+        "UPDATE event_state SET pruned_seats = COALESCE(pruned_seats, 0) + ? WHERE id = 1",
+        prunedSeats
+      );
+    }
+    return count;
+  }
+
   async alarm() {
     const now = Date.now();
     
+    // 1. Release expired pending holds
     const expired = this.ctx.storage.sql.exec("SELECT id FROM reservations WHERE status = 'pending' AND expires_at <= ?", now).toArray();
     for (const row of expired) {
       this.logEvent({ type: 'EXPIRED', holdId: row.id as string, reason: 'alarm_expiry' });
       await this.releaseSeat(row.id as string);
     }
 
-    // Find the next upcoming expiration
-    const next = this.ctx.storage.sql.exec("SELECT MIN(expires_at) as next_expiry FROM reservations WHERE status = 'pending'").toArray();
-    const nextExpiry = (next.length > 0 ? next[0]!.next_expiry : null) as number | null;
+    // 2. Prune confirmed holds older than 7-day cutoff (168 hours)
+    const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
+    await this.pruneConfirmedHolds(sevenDaysAgo);
 
-    if (nextExpiry) {
-      await this.ctx.storage.setAlarm(nextExpiry);
+    // 3. Find next upcoming alarm: earliest of next pending hold expiry or next confirmed hold prune
+    const nextPending = this.ctx.storage.sql.exec("SELECT MIN(expires_at) as next_expiry FROM reservations WHERE status = 'pending'").toArray();
+    const nextPendingExpiry = (nextPending.length > 0 ? nextPending[0]!.next_expiry : null) as number | null;
+
+    const nextConfirmed = this.ctx.storage.sql.exec("SELECT MIN(expires_at) as min_confirmed FROM reservations WHERE status = 'confirmed'").toArray();
+    const minConfirmed = (nextConfirmed.length > 0 ? nextConfirmed[0]!.min_confirmed : null) as number | null;
+    const nextPruneExpiry = minConfirmed !== null ? minConfirmed + 7 * 24 * 60 * 60 * 1000 : null;
+
+    let nextAlarm: number | null = null;
+    if (nextPendingExpiry !== null && nextPruneExpiry !== null) {
+      nextAlarm = Math.min(nextPendingExpiry, nextPruneExpiry);
+    } else {
+      nextAlarm = nextPendingExpiry ?? nextPruneExpiry;
+    }
+
+    if (nextAlarm !== null) {
+      await this.ctx.storage.setAlarm(nextAlarm);
     }
   }
 

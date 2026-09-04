@@ -655,9 +655,31 @@ In practice, the detection latency from confirmation failure to alert is: expiry
 
 The method only reads from DO SQLite; it does not modify any row. This is enforced in the test suite with a zero-mutation assertion matching the pattern used for `getHold()`: the test calls `listConfirmedHolds()`, then verifies that the DO's state (available seats, reservation statuses) is identical before and after the call. This prevents someone from "helpfully" adding cleanup logic to the method in a future pass and inadvertently breaking the reconciliation job's invariant that it never mutates DO state.
 
+**Confirmed Hold Pruning & Storage Bounds (Post-Phase-2 Fix):**
+
+While `listConfirmedHolds()` bounds query costs by filtering on `expires_at > cutoff` (7 days ago), confirmed hold rows would otherwise remain in DO SQLite indefinitely, causing unbounded storage growth on long-running events.
+- **Why pruning runs in `alarm()` and NOT inside `listConfirmedHolds()`:**
+  1. *Separation of concerns (CQRS):* A read query (`listConfirmedHolds`) must not have destructive side effects. Calling `listConfirmedHolds(since)` with an older timestamp should be able to inspect historical records if needed, without queries altering storage.
+  2. *Single Alarm Safety:* Cloudflare Durable Objects provide a single scheduled alarm per instance (`setAlarm`). Rather than inventing a competing alarm mechanism, `alarm()` was safely extended to handle two time horizons: 15-minute pending hold expiry and 7-day confirmed hold pruning (`Math.min(nextPendingExpiry, nextPruneExpiry)`). When a hold is confirmed in `confirmSeat()`, an alarm is scheduled for `expiresAt + 7 days` if no sooner alarm is pending.
+  3. *Reconciliation Grace Guarantee:* Reconciliation runs every 5 minutes and only inspects holds past their 15-minute expiry. Over 7 days (168 hours), a confirmed hold undergoes over 2,016 reconciliation sweeps before it reaches the 7-day pruning threshold, guaranteeing zero unreconciled orphans are ever pruned prematurely.
+  4. *Availability Math Invariant (`pruned_seats`):* In `SeatLedger`, available seats are dynamically computed from `total_seats - used_seats`. If confirmed hold rows are deleted from `reservations`, their seat counts would vanish from `SUM(seat_count)`, erroneously increasing available seats and causing overselling. To prevent this invariant violation, `event_state` tracks `pruned_seats INTEGER NOT NULL DEFAULT 0`. When confirmed rows are pruned, their seat count increments `pruned_seats`, ensuring `available = totalSeats - (activeUsedSeats + prunedSeats)` remains exact.
+
 **Reconciliation Scaling & Event Date Filter (A3):**
 
+The reconciliation job filters events at the D1 query level using a 7-day operational retention window (`gte(schema.events.date, cutoffDate)`) and processes matching events in parallel batches of 10 (`CHUNK_SIZE = 10`).
+
 **Known limitation:** the events-date filter (`gte(events.date, cutoffDate)`) relies on `reserveSeat`'s "event already started" guard, which was introduced in this same fix. Any hold created before that guard existed, for an event dated more than 7 days in the past, would not be checked by this filter going forward. In practice this is low-impact: such holds would already be long-resolved (confirmed or expired) given the 15-minute hold lifecycle, so this only matters for genuinely stale, already-settled historical data — not anything currently in flight.
+
+**Architectural Trade-off: Date-Window Filter vs. Hold-Activity Filtering**
+
+A theoretical gap in the date-proximity filter is that an event scheduled far in the future with zero bookings yet is swept every 5 minutes indefinitely, despite having nothing to reconcile until it has holds.
+
+However, investigating whether this sweep can be conditioned on "recent hold activity" reveals that no cheap signal exists in D1 or the broader architecture, and attempting to manufacture one is an anti-pattern:
+1. **D1 `bookings` carries no early signal:** Creating, releasing, or expiring a hold is an isolated operation inside the event's `SeatLedger` Durable Object; it never writes to D1. Furthermore, filtering on `EXISTS (SELECT 1 FROM bookings WHERE event_id = events.id)` creates a fatal correctness hole: an orphaned hold is specifically a hold confirmed in the DO whose D1 booking write failed. For an event's very first booking, D1 has zero booking rows. Filtering on existing bookings would permanently blind reconciliation to orphans on newly launched events.
+2. **Manufacturing a D1 signal (`lastActivityAt`) violates core concurrency guarantees:** Adding an `UPDATE events SET lastActivityAt = ...` into `reserveSeat` would inject a synchronous D1 write into the hot reservation critical path. This defeats the primary purpose of the `SeatLedger` DO architecture — absorbing concurrent ticket drops in memory without hitting D1 write locks, latency spikes, or billable write volume.
+3. **Probing the DO defeats the optimization:** Making a DO RPC call per event just to check for hold activity reintroduces the exact DO round-trip cost that pre-filtering is meant to eliminate.
+
+Therefore, the 7-day rolling date filter combined with chunked parallel DO queries remains the practical, principled engineering solution: it bounds historical event accumulation while preserving complete orphan-detection correctness and zero write-amplification on the reservation path.
 
 ---
 

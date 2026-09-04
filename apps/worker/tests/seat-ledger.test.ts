@@ -638,5 +638,92 @@ describe('SeatLedger DO & reserveSeat regression tests', () => {
       expect(confirmed[0]?.id).toBe(hold2.reservationId);
     });
   });
+
+  describe('confirmed hold pruning & storage cleanup', () => {
+    it('deletes confirmed hold older than the 7-day cutoff from storage via alarm', async () => {
+      const eventId = 'test-prune-confirmed-older';
+      const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+      await stub.initialize(10);
+
+      const oldHoldId = 'hold-older-than-7-days';
+      const eightDaysAgo = Date.now() - 8 * 24 * 60 * 60 * 1000;
+
+      // Seed an 8-day-old confirmed hold directly in DO SQLite storage
+      await runInDurableObject(stub, (instance: SeatLedger) => {
+        (instance as any).ctx.storage.sql.exec(
+          "INSERT INTO reservations (id, user_id, seat_count, expires_at, status) VALUES (?, ?, ?, ?, 'confirmed')",
+          oldHoldId,
+          'user-old',
+          2,
+          eightDaysAgo
+        );
+      });
+
+      // Verify row exists in SQLite storage prior to alarm
+      const beforeRows = await runInDurableObject(stub, (instance: SeatLedger) => {
+        return (instance as any).ctx.storage.sql.exec(
+          'SELECT * FROM reservations WHERE id = ?',
+          oldHoldId
+        ).toArray();
+      });
+      expect(beforeRows).toHaveLength(1);
+
+      // Trigger alarm
+      await runInDurableObject(stub, async (instance: SeatLedger) => {
+        await instance.alarm();
+      });
+
+      // Verify row is ACTUALLY DELETED from underlying SQLite storage (not just excluded from read)
+      const afterRows = await runInDurableObject(stub, (instance: SeatLedger) => {
+        return (instance as any).ctx.storage.sql.exec(
+          'SELECT * FROM reservations WHERE id = ?',
+          oldHoldId
+        ).toArray();
+      });
+      expect(afterRows).toHaveLength(0);
+
+      // Verify seat availability invariant is preserved (pruned seats count towards used seats)
+      expect(await stub.getAvailableSeats()).toBe(8);
+    });
+
+    it('leaves confirmed hold within the 7-day window untouched in storage', async () => {
+      const eventId = 'test-prune-confirmed-within-window';
+      const stub = workerEnv.SEAT_LEDGER.get(workerEnv.SEAT_LEDGER.idFromName(eventId));
+      await stub.initialize(10);
+
+      const recentHoldId = 'hold-within-7-days';
+      const twoDaysAgo = Date.now() - 2 * 24 * 60 * 60 * 1000;
+
+      // Seed a 2-day-old confirmed hold in DO SQLite storage
+      await runInDurableObject(stub, (instance: SeatLedger) => {
+        (instance as any).ctx.storage.sql.exec(
+          "INSERT INTO reservations (id, user_id, seat_count, expires_at, status) VALUES (?, ?, ?, ?, 'confirmed')",
+          recentHoldId,
+          'user-recent',
+          3,
+          twoDaysAgo
+        );
+      });
+
+      // Trigger alarm
+      await runInDurableObject(stub, async (instance: SeatLedger) => {
+        await instance.alarm();
+      });
+
+      // Verify row is STILL PRESENT and untouched in underlying SQLite storage
+      const afterRows = await runInDurableObject(stub, (instance: SeatLedger) => {
+        return (instance as any).ctx.storage.sql.exec(
+          'SELECT * FROM reservations WHERE id = ?',
+          recentHoldId
+        ).toArray();
+      });
+      expect(afterRows).toHaveLength(1);
+      expect(afterRows[0]?.id).toBe(recentHoldId);
+      expect(afterRows[0]?.status).toBe('confirmed');
+
+      // Availability is still 7 (10 - 3)
+      expect(await stub.getAvailableSeats()).toBe(7);
+    });
+  });
 });
 
