@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { useAuth } from '@clerk/nextjs';
+import { useAuth, useOrganization } from '@clerk/nextjs';
 import { createAuthenticatedTRPCClient } from '../../lib/trpc';
 import { useTicketDownload } from '../../hooks/useTicketDownload';
 import type { Booking } from '../../types';
@@ -8,6 +8,7 @@ import { BookingCard } from './BookingCard';
 
 export function AttendeeDashboard() {
   const { getToken } = useAuth();
+  const { organization, isLoaded } = useOrganization();
   const [bookings, setBookings] = useState<Booking[] | null>(null);
   const [bookingsLoading, setBookingsLoading] = useState(true);
   const [bookingsError, setBookingsError] = useState<string | null>(null);
@@ -15,6 +16,11 @@ export function AttendeeDashboard() {
   const { downloadState, handleDownloadTicket } = useTicketDownload();
 
   useEffect(() => {
+    // Guard covers three states that useOrganization can be in:
+    //   isLoaded = false  → Clerk is still initialising; don't fetch yet
+    //   isLoaded = true, organization = object → user is an organiser; skip bookings
+    //   isLoaded = true, organization = null   → user is an attendee; fetch bookings
+    if (!isLoaded || organization) return;
     let cancelled = false;
     const trpc = createAuthenticatedTRPCClient(getToken);
     trpc.listMyBookings.query()
@@ -34,7 +40,7 @@ export function AttendeeDashboard() {
     };
   // getToken is a stable Clerk reference — safe to omit from deps
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [isLoaded, organization]);
 
   return (
     <div className="mt-8">

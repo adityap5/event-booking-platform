@@ -564,7 +564,7 @@ This required a chain of supporting fixes, each worth knowing about if touching 
 
 - Reconciliation job implemented; automatic healing remains deferred. The job detects confirmed DO holds without corresponding D1 bookings and raises an audit/Sentry alert, but deliberately does not create or repair booking rows.
 - **`seat-ledger.ts` uses raw SQL, not Drizzle** — see point 2, deliberately deferred alongside its structural modularisation.
-- **`apps/worker/src/router.ts` and `index.ts` have been split into `routers/`, `handlers/`, and `procedures.ts`; `seat-ledger.ts` and the web-app have not yet received the same treatment** — see `ROADMAP.md`.
+- **`apps/worker/src/router.ts` and `index.ts` have been split into `routers/`, `handlers/`, and `procedures.ts`; `seat-ledger.ts` has not yet received the same treatment** — see `ROADMAP.md`.
 - **Pagination Limits vs CPU Execution Time:** `listPublicEvents` enforces a hard `MAX_OFFSET = 10000`. Cloudflare D1/SQLite offset pagination performs an index scan, and excessively deep offsets (e.g., 500k) consume too much CPU time under the Workers 50ms subrequest budget. This protects the runtime but restricts pagination depth. If datasets grow extremely large, this must be refactored to use cursor-based pagination.
 - **Hardcoded URLs in Edge/Middleware Boundaries:** While application URLs were moved to environment config, two locations retain hardcoded domains:
   1. `apps/web-app/middleware.ts` Content-Security-Policy URLs. Next.js edge middleware cannot access dynamic runtime non-`NEXT_PUBLIC_` environment variables without Cloudflare bindings, so static domains are retained as an explicit, zero-dependency policy.

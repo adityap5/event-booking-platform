@@ -75,7 +75,7 @@ export default function EventPage({
   return (
     <div className="max-w-[680px] mx-auto px-4 py-8 font-sans">
       <EventDetails event={event} availableSeats={displayedCount} />
-      <BookingWidget eventId={event.id} availableSeats={displayedCount} />
+      <BookingWidget eventId={event.id} />
     </div>
   );
 }

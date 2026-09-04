@@ -4,10 +4,9 @@ import { createAuthenticatedTRPCClient } from '../../lib/trpc';
 
 interface BookingWidgetProps {
   eventId: string;
-  availableSeats: number | null;
 }
 
-export function BookingWidget({ eventId, availableSeats }: BookingWidgetProps) {
+export function BookingWidget({ eventId }: BookingWidgetProps) {
   const { isSignedIn, getToken } = useAuth();
 
   const [seatCount, setSeatCount] = useState(1);

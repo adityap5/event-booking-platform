@@ -95,8 +95,8 @@ Genuine unfinished technical tasks and enhancements:
 - **Context:** `apps/worker/src/seat-ledger.ts` uses raw prepared SQL statements against `this.ctx.storage.sql`, while the rest of the codebase uses Drizzle ORM over D1.
 - **Status:** Still open. Drizzle's DO SQLite integration (`drizzle-orm/durable-sqlite`) uses separate migration tooling. Keeping raw SQL preserves visibility over the synchronous critical section until structural modularisation is completed.
 
-### 2. SeatLedger and Web App Modularisation
-- **Context:** `apps/worker/src/seat-ledger.ts` remains a monolithic file managing initialization, seat reservations, holds, alarms, ticket minting/redemption, refunds, and WebSocket broadcasting. The frontend `web-app` structure similarly contains monolithic page files.
+### 2. SeatLedger Modularisation
+- **Context:** `apps/worker/src/seat-ledger.ts` remains a monolithic file managing initialization, seat reservations, holds, alarms, ticket minting/redemption, refunds, and WebSocket broadcasting.
 - **Status:** Still open. Modularising `seat-ledger.ts` into isolated domain services (reservation engine, alarm manager, socket hub) will reduce incidental regression risks.
 
 ### 3. Organiser Email Lookup for Calendar Invites

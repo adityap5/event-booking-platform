@@ -6,7 +6,7 @@ import { AttendeeDashboard } from '../components/dashboard/AttendeeDashboard';
 
 export default function DashboardPage() {
   const { userId, orgId } = useAuth();
-  const { organization } = useOrganization();
+  const { organization, isLoaded } = useOrganization();
 
   return (
     <RequireAuth>
@@ -16,7 +16,7 @@ export default function DashboardPage() {
         <h1 className="text-2xl font-bold mb-1">Dashboard</h1>
         <p className="text-gray-600 mb-4">User ID: {userId}</p>
 
-        {organization ? (
+        {!isLoaded ? null : organization ? (
           <OrganiserDashboard organizationName={organization.name} orgId={orgId} />
         ) : (
           <AttendeeDashboard />
