@@ -11,6 +11,8 @@
  *  - Status guard: cancelled booking returns NOT_FOUND
  *  - Lazy generation: R2 miss triggers generation + R2 upload + returns PDF
  *  - Lazy generation: R2 object exists after lazy generation (not just response returned)
+ *  - Rate limit boundary: 30 calls allowed, 31st rejected with TOO_MANY_REQUESTS
+ *  - Rate limit isolation: independent per-user buckets
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -306,6 +308,81 @@ describe('getTicket procedure', () => {
   it('non-existent bookingId → NOT_FOUND', async () => {
     const caller = attendeeCaller();
     await expect(caller.getTicket({ bookingId: 'does-not-exist' })).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+  });
+
+  // ── Rate limiting tests ───────────────────────────────────────────────────
+
+  it('rate limit boundary: permits 30 getTicket calls per user, 31st rejected with TOO_MANY_REQUESTS', async () => {
+    const callerUserA = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-rate-limit-ticket-A',
+      orgId: null,
+      role: null,
+    });
+
+    const fakeBookingId = 'booking-rate-limit-test';
+
+    // First 30 calls for User A pass the rate limit check (failing downstream on NOT_FOUND)
+    for (let i = 0; i < 30; i++) {
+      await expect(
+        callerUserA.getTicket({ bookingId: fakeBookingId })
+      ).rejects.toMatchObject({
+        code: 'NOT_FOUND',
+      });
+    }
+
+    // 31st call for User A must be rejected by RateLimiter with TOO_MANY_REQUESTS
+    await expect(
+      callerUserA.getTicket({ bookingId: fakeBookingId })
+    ).rejects.toMatchObject({
+      code: 'TOO_MANY_REQUESTS',
+      message: 'Too many requests. Please try again shortly.',
+    });
+  });
+
+  it('rate limit per-user isolation: User B is not blocked when User A hits rate limit', async () => {
+    const callerUserA = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-rate-limit-ticket-iso-A',
+      orgId: null,
+      role: null,
+    });
+
+    const callerUserB = createTestCaller({
+      env: workerEnv,
+      db,
+      userId: 'user-rate-limit-ticket-iso-B',
+      orgId: null,
+      role: null,
+    });
+
+    const fakeBookingId = 'booking-rate-limit-iso-test';
+
+    // User A exhausts all 30 rate-limit slots
+    for (let i = 0; i < 30; i++) {
+      await expect(
+        callerUserA.getTicket({ bookingId: fakeBookingId })
+      ).rejects.toMatchObject({
+        code: 'NOT_FOUND',
+      });
+    }
+
+    // 31st call for User A is rate limited
+    await expect(
+      callerUserA.getTicket({ bookingId: fakeBookingId })
+    ).rejects.toMatchObject({
+      code: 'TOO_MANY_REQUESTS',
+      message: 'Too many requests. Please try again shortly.',
+    });
+
+    // User B's independent bucket is unaffected (fails with NOT_FOUND instead of TOO_MANY_REQUESTS)
+    await expect(
+      callerUserB.getTicket({ bookingId: fakeBookingId })
+    ).rejects.toMatchObject({
       code: 'NOT_FOUND',
     });
   });

@@ -7,6 +7,7 @@ import { requireOrganiserRole } from '@event-booking/permissions';
 import { workerProcedure } from '../procedures.js';
 import { generateTicketPdf } from '../ticket-pdf.js';
 import * as Sentry from '@sentry/cloudflare';
+import { logStructured } from '../logger.js';
 
 export const ticketsRouter = {
   /**
@@ -27,6 +28,26 @@ export const ticketsRouter = {
   getTicket: workerProcedure
     .input(z.object({ bookingId: z.string().min(1) }))
     .query(async ({ input, ctx }) => {
+      // Rate limit ticket fetching per user (30 requests per 60s).
+      // Attendees and organisers may reasonably reload ticket pages, re-download, or
+      // inspect multiple bookings in quick succession. This budget is noticeably more
+      // generous than mutations (e.g. createCheckoutSession at 10/60s), while firmly
+      // capping repeat lazy PDF generation (which is CPU-intensive) to protect Worker
+      // resources against denial-of-service or runaway clients.
+      const rateLimiter = ctx.env.RATE_LIMITER.get(ctx.env.RATE_LIMITER.idFromName(ctx.userId));
+      const { allowed } = await rateLimiter.checkLimit('getTicket', 30, 60_000);
+      if (!allowed) {
+        logStructured({
+          category: 'rate_limit_rejection',
+          action: 'getTicket',
+          userId: ctx.userId,
+        });
+        throw new TRPCError({
+          code: 'TOO_MANY_REQUESTS',
+          message: 'Too many requests. Please try again shortly.',
+        });
+      }
+
       const db = ctx.db;
       const { bookingId } = input;
 
