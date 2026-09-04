@@ -88,7 +88,8 @@ type ConfirmBookingFromPaymentResult =
   | { outcome: 'event_not_found' }
   | { outcome: 'attendee_not_found'; userId }
   | { outcome: 'amount_mismatch'; expectedPence; receivedPence; ... }
-  | { outcome: 'orphaned_hold'; holdId; eventId };
+  | { outcome: 'orphaned_hold'; holdId; eventId }
+  | { outcome: 'duplicate_payment_for_confirmed_hold'; incomingPaymentIntentId; existingPaymentIntentId; holdId; eventId };
 ```
 
 **Non-atomicity, made explicit rather than assumed away:** `confirmSeat()` on the DO and the D1 booking insert are two separate writes with no rollback between them. Earlier versions of this logic treated the DO's `HOLD_ALREADY_USED` error as proof a booking had been written — but a crash between confirming the seat and inserting the booking would make that assumption false, and a Stripe retry would then silently return `200` on a booking that was never created, permanently. The helper now queries D1 for an actual booking row before trusting `HOLD_ALREADY_USED`; if none exists, it returns `orphaned_hold` instead, and the webhook responds `500` (loud, not silent) rather than acknowledging it. This doesn't close the gap — see the updated §10 bullet — it makes the gap detectable instead of invisible.
@@ -113,6 +114,36 @@ type ConfirmBookingFromPaymentResult =
 **Fix:** `reserveSeat` now rejects (`TOO_MANY_PENDING_HOLDS` → `CONFLICT`) if the calling user already has a live pending hold for the event (`status = 'pending' AND expires_at > now` — an expired-but-not-yet-alarm- cleaned-up row does not count against the user).
 
 **Deliberate trade-off:** reject-on-duplicate, not auto-replace. A user who wants to change their seat count mid-flow currently has no way to release their existing hold early and must wait out the 15-minute expiry — see the new §10 bullet, "No user-facing hold-release action." The 15- minute hold duration itself was deliberately left unchanged — a separate, independent lever from this fix.
+
+### 2d. Out-of-Order Payment Failure Guard (Post-Phase-2 Fix)
+
+**Original bug:** The Stripe webhook handler for `payment_intent.payment_failed` (`apps/worker/src/handlers/stripe-webhook.ts`) executed an unconditional D1 update: `UPDATE bookings SET status = 'cancelled' WHERE hold_id = ?`. In this codebase, a row in `schema.bookings` is only ever inserted at confirmation time (`confirmBookingFromPayment`) with `status = 'confirmed'`. Because Stripe delivers webhooks asynchronously and does not guarantee in-order delivery, a customer whose payment initially failed or was retried could have their earlier `payment_intent.payment_failed` event arrive *after* `payment_intent.succeeded` had already confirmed the booking. Under the original unconditional query, this delayed event would overwrite an already-confirmed (or already-refunded) booking row to `'cancelled'`, corrupting the durable system of record while the attendee had legitimately paid.
+
+**Fix:** The D1 update is now guarded with `notInArray(schema.bookings.status, ['confirmed', 'refunded'])`:
+```ts
+await db.update(schema.bookings)
+  .set({ status: 'cancelled' })
+  .where(
+    and(
+      eq(schema.bookings.holdId, holdId),
+      notInArray(schema.bookings.status, ['confirmed', 'refunded']),
+    ),
+  );
+```
+This ensures that any out-of-order or late-arriving `payment_intent.payment_failed` webhook can only cancel rows that have not settled into a terminal confirmed or refunded state, preserving booking integrity against asynchronous webhook delivery races.
+
+### 2e. Duplicate Payment Prevention & Double-Charge Handling (Post-Phase-2 Fix)
+
+**Original gap:** When a buyer initiated checkout, `createCheckoutSession` (`apps/worker/src/routers/payments.ts`) created a new Stripe Checkout Session without passing an application-level idempotency key. Rapid double-clicks or multiple tabs from the buyer could spawn two distinct Checkout Sessions backed by separate PaymentIntents for the identical `holdId`. If the buyer completed payment on both sessions, Stripe delivered two `payment_intent.succeeded` webhooks for the same hold. In `confirmBookingFromPayment` (`apps/worker/src/booking-confirmation.ts`), when the second webhook arrived, the DO's `confirmSeat()` rejected with `HOLD_ALREADY_USED`. The helper previously queried D1 only to check if a booking row existed, and if so, returned `already_confirmed` (treating it as an idempotent webhook redelivery). This caused the webhook to return HTTP 200 and silently drop the second payment, with no alert and no refund, leaving the customer double-charged.
+
+**Fix:** A two-layer protection mechanism was introduced:
+1. **Frontend/Session Creation Idempotency:** `createCheckoutSession` now computes a deterministic idempotency key derived from the immutable `holdId`:
+   ```ts
+   const idempotencyKey = `checkout_${input.holdId}`;
+   const session = await stripe.checkout.sessions.create({ ... }, { idempotencyKey });
+   ```
+   This ensures rapid duplicate clicks or retries within Stripe's 24-hour idempotency window receive the exact same Checkout Session rather than creating redundant PaymentIntents.
+2. **Webhook PaymentIntent Comparison:** If two distinct PaymentIntents somehow succeed for the same hold (e.g. across idempotency windows or external sessions), `confirmBookingFromPayment` compares the stored `existingBooking.stripePaymentIntentId` against the incoming `stripePaymentIntentId`. If they match, it returns `already_confirmed` (true idempotent replay). If they differ, it returns `duplicate_payment_for_confirmed_hold`. The Stripe webhook handler logs an error, alerts Sentry at `error` level with both PaymentIntent IDs, and writes an `audit_log` row (`eventType: 'duplicate_payment_captured'`) so that support/finance personnel can manually issue a refund. The existing confirmed booking row is left intact.
 
 ---
 
@@ -287,8 +318,10 @@ Rate limits enforced via `RateLimiter`:
 | `createCheckoutSession` | `userId` | 10 per 60s | Prevents Stripe Checkout session spam |
 | `createSocketTicket` | `userId` | 10 per 60s | Prevents Durable Object WebSocket connection exhaustion |
 | `uploadEventCover` | `userId` | 5 per 60s | Tighter bounds for R2 write operations |
+| `getTicket` | `userId` | 30 per 60s | Authenticated ticket PDF query; generous for reloads/inspection while capping CPU-heavy lazy PDF generation |
 | `publicRead` | IP (`CF-Connecting-IP`) | 60 per 60s | Shared bucket for all public read queries (`listPublicEvents`, `getPublicEvent`, `getAvailableSeats`) |
 | `publicImageRead` | IP (`CF-Connecting-IP`) | 120 per 60s | Higher capacity for public `/images/*` loading (often bulk-fetched) |
+| `publicApiPreAuth` | IP (`CF-Connecting-IP`) | 1200 per 60s | Coarse pre-authentication flood backstop for `/api/v1/events` protecting SHA-256 and D1 lookups |
 
 Rate limiting is a separate DO class (`RateLimiter`) from `SeatLedger`, not folded into the seat DO — it's a cross-cutting concern with a different lifecycle (per-user or per-org, not per-event).
 
@@ -699,6 +732,26 @@ In `routers/tickets.ts`, authorization (`isOwnAttendee` and organiser role verif
 - **Preventing Status Leaks:** If the status guard ran before authorization, unauthorized callers would receive `NOT_FOUND` ("No ticket available") for `pending` or `cancelled` bookings and `FORBIDDEN` for `confirmed` bookings. This would allow unauthorized users to probe arbitrary booking IDs to discover their status. Checking authorization first ensures that any unauthorized caller receives `FORBIDDEN` uniformly across all existing bookings.
 - **Non-existent booking IDs:** Non-existent booking IDs return `NOT_FOUND` ("Booking not found"). This is an accepted trade-off because booking IDs are unguessable UUIDs (`crypto.randomUUID()`), rendering ID-enumeration or existence-probing attacks impractical.
 
+### Non-WinAnsi Character Sanitization in Ticket PDF Generation (Post-Phase-2 Fix)
+
+**Original bug:** Ticket PDF generation in `apps/worker/src/ticket-pdf.ts` uses `pdf-lib` (pinned version `^1.17.1` in `package.json`) with standard built-in fonts (`StandardFonts.Helvetica` and `StandardFonts.HelveticaBold`). Standard 14 PDF fonts strictly employ Adobe's WinAnsi single-byte encoding table. Strings containing characters outside this code page (including CJK ideographs, Cyrillic, Arabic, or emojis) cannot be encoded by `pdf-lib` and cause `font.widthOfTextAtSize()` or page rendering calls to throw an unhandled encoding exception (`WinAnsi cannot encode ...`). The original `sanitize()` implementation only stripped ASCII control characters (`[\x00-\x1F\x7F]`) and truncated length, leaving arbitrary Unicode glyphs untouched.
+
+**Impact on Lazy Generation:** When ticket generation fails during webhook processing, the failure is caught and logged, leaving the booking confirmed in D1 without an R2 PDF object. When the attendee or organiser subsequently views the ticket via `getTicket` (`apps/worker/src/routers/tickets.ts`), the query triggers the lazy-generation fallback path. Because the attendee's name or event title contained unencodable Unicode glyphs, every lazy generation attempt repeatedly threw `INTERNAL_SERVER_ERROR` ("Unable to generate ticket. Please try again later."), permanently preventing legitimate ticket downloads for affected bookings.
+
+**Fix:** `sanitize()` now checks each character's encodability against the target `PDFFont` using `font.widthOfTextAtSize(ch, 1)` within a `try/catch` block. Any character not encodable by the font is safely replaced with `'?'`:
+```ts
+let safeStr = '';
+for (const ch of truncated) {
+  try {
+    font.widthOfTextAtSize(ch, 1);
+    safeStr += ch;
+  } catch {
+    safeStr += '?';
+  }
+}
+```
+This ensures names and event titles in any language or script (such as CJK, Cyrillic, Arabic, or with emoji decorations) generate valid, parseable A5 PDF tickets without throwing exceptions, while legitimately encodable accented Western European Latin characters (e.g. `é`, `ü`, `ç`) remain fully preserved.
+
 ### Cross-Site WebSocket Hijacking (CSWSH) Defense on `/ws`
 
 `handleWebSocketUpgrade` (`handlers/websocket.ts`) validates the `Origin` header against `CORS_ALLOWED_ORIGINS`:
@@ -829,11 +882,33 @@ When two organiser refund requests for the same booking arrive simultaneously:
 - **Atomic Compare-and-Set (CAS) Subscription Establishment:**
   - In `customer.subscription.created` and the out-of-order `customer.subscription.updated` handler, subscription ownership is claimed via an atomic conditional D1 update (`WHERE id = ? AND (stripe_subscription_id IS NULL OR subscription_status = 'canceled')`).
   - Ownership is determined strictly from the affected-row count (`.returning()`). If the claim loses the race (0 rows updated), the worker re-reads the organisation from D1, treats the incoming subscription as redundant, avoids overwriting D1, and defensively cancels the loser on Stripe via `stripe.subscriptions.cancel(subscription.id)`.
+  - **Losing Subscription Cancellation Alerting (Post-Phase-2 Fix):** In `customer.subscription.created`, the defensive cancellation of the losing subscription was previously wrapped in a `try/catch` that only logged to `console.error`. If Stripe's cancellation request failed (e.g. transient Stripe API error or network drop), the failure was silent from an operations standpoint, allowing duplicate recurring subscriptions on Stripe to persist undetected. This catch block now captures the exception via `Sentry.captureMessage` at `error` level with full diagnostic metadata (`orgId`, `authoritativeSubscriptionId`, `rejectedSubscriptionId`, and the error message). By deliberate design, the equivalent non-matching-subscription branch in `customer.subscription.updated` was investigated and intentionally *not* given defensive cancellation: because the database stores only a single `stripeSubscriptionId` slot, `customer.subscription.updated` cannot safely differentiate between a genuine concurrent race loser and a legitimately superseded old subscription whose update arrived late. Defensively cancelling in `updated` could erroneously cancel an active customer's plan; therefore, logging and ignoring remains the correct invariant for `customer.subscription.updated`.
 - **Concurrent Checkout & Duplicate Prevention:**
   - `createSubscriptionCheckout` applies per-organisation rate limiting via the `RATE_LIMITER` Durable Object and attaches a time-bucketed deterministic idempotency key (`sub_checkout_${orgId}_${bucket}`) to `stripe.checkout.sessions.create`.
 - **Subscription Staleness & Out-of-Order Guards:**
   - Webhook event updates (`updated` and `deleted`) verify that `subscription.id === organisation.stripeSubscriptionId` before modifying `subscriptionStatus`. Events for stale or replaced subscriptions are logged and ignored, preventing old events from regressing entitlement state.
   - If a `customer.subscription.updated` event arrives before `customer.subscription.created` when `organisations.stripeSubscriptionId` is null, the handler establishes the subscription via the atomic CAS claim.
+
+### 4. Subscription Lifecycle Recovery — `incomplete_expired` (Post-Phase-2 Fix)
+
+**Original bug:** When an organiser initiated a subscription checkout via `createSubscriptionCheckout` (`apps/worker/src/routers/subscriptions.ts`), the procedure validated that the organisation did not already possess an active subscription. However, the allow-list permitted only organisations with `subscriptionStatus === 'inactive'` (never subscribed) or `'canceled'` (terminated). Any other status threw `TRPCError` with `BAD_REQUEST` ("Organisation already has a subscription. Manage your subscription through the Billing Portal.").
+
+**The Lockout Scenario:** When an organisation's initial payment failed (or 3D Secure / SCA was abandoned mid-checkout), Stripe set the initial subscription to status `incomplete`. If the initial invoice was not resolved within Stripe's 23-hour payment window, Stripe automatically transitioned the subscription to `incomplete_expired`. In Stripe's subscription state machine, `incomplete_expired` is an irreversible, terminal status — the subscription object can never be paid, retried, updated, or reactivated. Furthermore, the Stripe Customer Billing Portal cannot collect payment on an expired first invoice or create a new subscription from scratch. As a result, an organisation with an expired first payment was permanently locked out: `createSubscriptionCheckout` rejected them with instructions to use the Billing Portal, while the Billing Portal offered no path to recover.
+
+**Fix:** `createSubscriptionCheckout` now includes `'incomplete_expired'` in its checkout allow-list alongside `'inactive'` and `'canceled'`:
+```ts
+if (
+  org.subscriptionStatus !== 'inactive' &&
+  org.subscriptionStatus !== 'canceled' &&
+  org.subscriptionStatus !== 'incomplete_expired'
+) {
+  throw new TRPCError({
+    code: 'BAD_REQUEST',
+    message: 'Organisation already has a subscription. Manage your subscription through the Billing Portal.',
+  });
+}
+```
+**Deliberate exclusion of `incomplete`:** The live `'incomplete'` status was intentionally excluded from the allow-list and remains rejected. While an initial invoice is actively in the 23-hour `'incomplete'` window, an asynchronous payment or customer 3D Secure verification may still be in flight. Allowing a new checkout session during this live window would introduce a duplicate subscription race if the pending transaction settled. Only once the window elapses and Stripe marks the subscription `'incomplete_expired'` is the object guaranteed permanently dead and safe to replace.
 
 ---
 
@@ -920,3 +995,25 @@ When two organiser refund requests for the same booking arrive simultaneously:
 - Organiser key-management mutations and queries (`generateApiKey`, `rotateApiKey`, `revokeApiKey`, `getApiKeyInfo`) in `apps/worker/src/routers/apiKeys.ts` require Clerk JWT authentication and enforce:
   1. `requireOrganiserRole(ctx, 'organiser')`
   2. `requireActiveOrganisation(ctx)`
+
+### 11. Pre-Authentication IP Rate Limiting & Denial-of-Service Defense (Post-Phase-2 Fix)
+
+**Original ordering gap:** In `apps/worker/src/handlers/public-api.ts`, API key authentication (`authenticateApiKey(db, rawKey)`) was originally executed prior to any rate limiting. When a request arrived with an `Authorization: Bearer <key>` header, the handler immediately computed a SHA-256 hash of the token and queried D1 (`organisation_api_keys`) to resolve the key and its associated organisation. Only after successful key resolution was the authenticated per-key rate limit (`checkLimit('publicApi', 300, 60_000)`) enforced. This left a significant denial-of-service vulnerability: an unauthenticated caller or scraper could blast `/api/v1/events` with invalid, malformed, or rapidly rotating random tokens, forcing edge CPU to compute SHA-256 digests and D1 to execute indexed SQLite lookups on every incoming request with zero rate limiting.
+
+**Fix:** A coarse, pre-authentication IP rate limit was placed at the very start of `handlePublicApi`, preceding any header inspection, crypto hashing, or database interaction:
+```ts
+const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown-ip';
+const ipRateLimiter = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(ip));
+const { allowed: ipAllowed } = await ipRateLimiter.checkLimit('publicApiPreAuth', 1200, 60_000);
+if (!ipAllowed) {
+  logStructured({
+    category: 'rate_limit_rejection',
+    action: 'publicApiPreAuth',
+    keyType: 'ip',
+  });
+  return jsonResponse({ error: 'Too Many Requests' }, 429);
+}
+```
+Any abusive flood of unauthenticated requests is rejected with HTTP 429 directly by the `RateLimiter` Durable Object, completely bypassing both SHA-256 computation and D1 database queries.
+
+**Ceiling Calibration for Multi-Tenant Egress NATs:** The pre-authentication limit is set to 1200 requests per 60 seconds. This is deliberately tuned four times higher than the authenticated per-key quota (300 req / 60s). Because corporate proxies, cloud egress gateways, and cellular NATs often pool hundreds or thousands of clients behind a single public IP, a restrictive IP ceiling would cause legitimate third-party integrators with different valid API keys to throttle each other. A ceiling of 1200 req / 60s guarantees that multiple independent organisations sharing an egress IP can each fully utilize their individual 300 req / 60s quota without interference, while firmly shutting down volumetric unauthenticated flood attacks.
