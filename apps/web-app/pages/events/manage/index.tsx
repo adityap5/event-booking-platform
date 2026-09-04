@@ -1,116 +1,12 @@
 import Head from 'next/head';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { OrganizationSwitcher, UserButton, useAuth } from '@clerk/nextjs';
+import { useAuth } from '@clerk/nextjs';
 import { RequireOrgAuth } from '../../../components/RequireOrgAuth';
+import { AppHeader } from '../../../components/layout/AppHeader';
+import { EventManageRow } from '../../../components/events/EventManageRow';
 import { createAuthenticatedTRPCClient } from '../../../lib/trpc';
-import { useSeatCount } from '../../../hooks/useSeatCount';
-import styles from './manage.module.css';
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-interface OrgEvent {
-  id: string;
-  name: string;
-  date: number;
-  totalSeats: number;
-  pricePerSeat: number;
-  coverImageUrl: string | null;
-}
-
-// ---------------------------------------------------------------------------
-// EventManageRow — only component allowed to call useSeatCount per event
-// (Rules of Hooks: hooks cannot be called inside .map())
-// ---------------------------------------------------------------------------
-
-type AttendeeRow = {
-  id: string;
-  seatCount: number;
-  attendeeName: string;
-  attendeeEmail: string;
-};
-
-function EventManageRow({ id, name, date, totalSeats, pricePerSeat, coverImageUrl }: OrgEvent) {
-  const { getToken } = useAuth();
-  const available = useSeatCount(id);
-
-  const [expanded, setExpanded] = useState(false);
-  const [attendees, setAttendees] = useState<AttendeeRow[] | null>(null);
-  const [loadingAttendees, setLoadingAttendees] = useState(false);
-  const [attendeesError, setAttendeesError] = useState<string | null>(null);
-
-  const handleToggle = () => {
-    if (!expanded && attendees === null) {
-      setLoadingAttendees(true);
-      const trpc = createAuthenticatedTRPCClient(getToken);
-      trpc.getEventAttendees.query({ eventId: id })
-        .then(setAttendees)
-        .catch((err: unknown) => setAttendeesError(err instanceof Error ? err.message : 'Error loading attendees'))
-        .finally(() => setLoadingAttendees(false));
-    }
-    setExpanded(!expanded);
-  };
-
-  const formattedDate = new Date(date).toLocaleDateString('en-GB', {
-    weekday: 'long',
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-    hour: '2-digit',
-  minute: '2-digit',
-  });
-
-  const formattedPrice = `£${(pricePerSeat / 100).toFixed(2)} per seat`;
-
-  return (
-    <div className={styles.row}>
-      {coverImageUrl && (
-        <img src={coverImageUrl} alt={name} className={styles.rowImage} />
-      )}
-      <div className={styles.rowInfo}>
-        <p className={styles.rowName}>{name}</p>
-        <p className={styles.rowMeta}>{formattedDate}</p>
-        <p className={styles.rowMeta}>{formattedPrice}</p>
-        <p className={available === 0 ? styles.rowSeatsLow : styles.rowSeats}>
-          Available: {available !== null ? `${available} / ${totalSeats}` : 'Loading…'}
-        </p>
-
-        <button onClick={handleToggle} className={styles.attendeeToggle}>
-          {expanded ? 'Hide attendees' : 'View attendees'}
-        </button>
-
-        {expanded && (
-          <div className={styles.attendeesContainer}>
-            {loadingAttendees && <p className={styles.attendeeState}>Loading attendees…</p>}
-            {!loadingAttendees && attendeesError && <p className={styles.attendeeError}>{attendeesError}</p>}
-            {!loadingAttendees && !attendeesError && attendees !== null && attendees.length === 0 && (
-              <p className={styles.attendeeState}>No confirmed bookings yet.</p>
-            )}
-            {!loadingAttendees && !attendeesError && attendees !== null && attendees.length > 0 && (
-              <ul className={styles.attendeeList}>
-                {attendees.map((a) => (
-                  <li key={a.id} className={styles.attendeeRow}>
-                    <div>
-                      <span className={styles.attendeeName}>{a.attendeeName}</span>
-                      <span className={styles.attendeeEmail}>({a.attendeeEmail})</span>
-                    </div>
-                    <span className={styles.attendeeSeats}>{a.seatCount} seat{a.seatCount !== 1 ? 's' : ''}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// ManageEventsPage
-// ---------------------------------------------------------------------------
+import type { OrgEvent } from '../../../types';
 
 export default function ManageEventsPage() {
   const { getToken } = useAuth();
@@ -145,46 +41,34 @@ export default function ManageEventsPage() {
 
   return (
     <RequireOrgAuth>
-      <div className={styles.page}>
+      <div className="p-8 font-sans">
         <Head>
           <title>Manage Events | Organiser View</title>
         </Head>
 
-        <header className={styles.header}>
-          <OrganizationSwitcher
-            hidePersonal={true}
-            appearance={{
-              elements: {
-                organizationSwitcherPopoverActionButton__createOrganization: {
-                  display: 'none',
-                },
-              },
-            }}
-          />
-          <UserButton />
-        </header>
+        <AppHeader />
 
-        <h1 className={styles.title}>Manage Your Events</h1>
+        <h1 className="text-[1.75rem] font-bold text-[#333] mb-6">Manage Your Events</h1>
 
         {loading && (
-          <p className={styles.stateMessage}>Loading your events…</p>
+          <p className="text-[#555] mt-4">Loading your events…</p>
         )}
 
         {!loading && error && (
-          <p className={styles.errorMessage}>Error: {error}</p>
+          <p className="text-[#c0392b] mt-4">Error: {error}</p>
         )}
 
         {!loading && !error && events !== null && events.length === 0 && (
-          <div className={styles.emptyState}>
+          <div className="p-8 border border-dashed border-[#ccc] rounded-lg text-center text-[#666]">
             <p>You haven&apos;t created any events yet.</p>
-            <Link href="/dashboard" className={styles.emptyLink}>
+            <Link href="/dashboard" className="inline-block mt-4 px-5 py-2.5 bg-[#0070f3] hover:bg-[#0059c2] text-white no-underline rounded-md text-[0.9rem] font-medium transition-colors">
               Go to Dashboard
             </Link>
           </div>
         )}
 
         {!loading && !error && events !== null && events.length > 0 && (
-          <div className={styles.list}>
+          <div className="flex flex-col gap-4">
             {events.map((event) => (
               <EventManageRow key={event.id} {...event} />
             ))}

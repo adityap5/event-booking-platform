@@ -3,7 +3,6 @@ import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { useAuth } from '@clerk/nextjs';
 import { createAuthenticatedTRPCClient } from '../../lib/trpc';
-import styles from './booking.module.css';
 
 export default function BookingCancelledPage() {
   const router = useRouter();
@@ -56,40 +55,45 @@ export default function BookingCancelledPage() {
   }, [router.isReady, isLoaded, isSignedIn, holdId, eventId, getToken]);
 
   return (
-    <div className={styles.container}>
-      <h1 className={styles.heading}>Booking Cancelled</h1>
+    <div className="max-w-[560px] my-16 mx-auto px-4 py-8 font-sans text-center">
+      <h1 className="text-[2rem] font-bold mb-4 text-[#333]">Booking Cancelled</h1>
 
-      <p className={styles.bodyLarge}>
+      <p className="text-[#555] leading-[1.6] mb-8">
         Your booking was not completed. No payment has been taken.
       </p>
 
       {releaseStatus === 'releasing' && (
-        <p className={styles.body} style={{ color: '#555' }}>
+        <p className="text-[#555] leading-[1.6] mb-6">
           Releasing held seats…
         </p>
       )}
 
       {releaseStatus === 'released' && (
-        <p className={styles.body} style={{ color: '#27ae60', fontWeight: 500 }}>
+        <p className="text-[#27ae60] font-medium leading-[1.6] mb-6">
           Your held seats have been released back to general availability.
         </p>
       )}
 
       {releaseStatus === 'error' && errorMessage && (
-        <p className={styles.body} style={{ color: '#666', fontSize: '0.9rem' }}>
+        <p className="text-[#666] text-[0.9rem] leading-[1.6] mb-6">
           {errorMessage === 'Cannot release a confirmed booking'
             ? 'This booking is already confirmed.'
             : 'Seat hold status updated.'}
         </p>
       )}
 
-      <div style={{ marginTop: '2rem', display: 'flex', gap: '1rem', justifyContent: 'center', flexWrap: 'wrap' }}>
+      <div className="mt-8 flex gap-4 justify-center flex-wrap">
         {eventId && (
-          <Link href={`/events/${eventId}`} className={styles.cta}>
+          <Link href={`/events/${eventId}`} className="inline-block px-6 py-3 bg-[#0070f3] hover:bg-[#0059c2] text-white no-underline rounded-md font-medium transition-colors">
             Back to event
           </Link>
         )}
-        <Link href="/" className={styles.cta} style={eventId ? { backgroundColor: '#f0f0f0', color: '#333' } : undefined}>
+        <Link
+          href="/"
+          className={`inline-block px-6 py-3 no-underline rounded-md font-medium transition-colors ${
+            eventId ? 'bg-[#f0f0f0] hover:bg-[#e4e4e4] text-[#333]' : 'bg-[#0070f3] hover:bg-[#0059c2] text-white'
+          }`}
+        >
           Browse all events
         </Link>
       </div>

@@ -1,5 +1,6 @@
 import type { AppProps } from 'next/app';
 import dynamic from 'next/dynamic';
+import '../styles/globals.css';
 
 const ClerkProvider = dynamic(
   () => import('@clerk/nextjs').then((mod) => mod.ClerkProvider),

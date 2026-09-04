@@ -1,6 +1,5 @@
 import Link from 'next/link';
 import { useRouter } from 'next/router';
-import styles from './booking.module.css';
 
 export default function BookingSuccessPage() {
   const router = useRouter();
@@ -10,22 +9,22 @@ export default function BookingSuccessPage() {
     : null;
 
   return (
-    <div className={styles.container}>
+    <div className="max-w-[560px] my-16 mx-auto px-4 py-8 font-sans text-center">
       {/* Success icon */}
-      <div className={styles.icon}>✓</div>
+      <div className="w-16 h-16 rounded-full bg-[#27ae60] text-white text-[2rem] leading-[64px] mx-auto mb-6">✓</div>
 
-      <h1 className={styles.heading}>Booking Confirmed!</h1>
+      <h1 className="text-[2rem] font-bold mb-4 text-[#333]">Booking Confirmed!</h1>
 
-      <p className={styles.body}>
+      <p className="text-[#555] leading-[1.6] mb-6">
         Your booking has been confirmed. You will receive a confirmation email shortly.
       </p>
 
       {/* Stripe session reference — shown when present */}
       {sessionId && (
-        <p className={styles.reference}>Reference: {sessionId}</p>
+        <p className="text-[0.8rem] text-[#999] mb-8 break-all">Reference: {sessionId}</p>
       )}
 
-      <Link href="/" className={styles.cta}>
+      <Link href="/" className="inline-block px-6 py-3 bg-[#0070f3] hover:bg-[#0059c2] text-white no-underline rounded-md font-medium transition-colors">
         Browse more events
       </Link>
     </div>

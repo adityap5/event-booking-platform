@@ -1,19 +1,18 @@
 import Head from 'next/head';
 import Link from 'next/link';
 import { useState, useEffect, useCallback } from 'react';
-import { OrganizationSwitcher, UserButton, useAuth, useOrganization } from '@clerk/nextjs';
+import { useAuth, useOrganization } from '@clerk/nextjs';
 import { RequireOrgAuth } from '../../components/RequireOrgAuth';
+import { AppHeader } from '../../components/layout/AppHeader';
+import { ApiKeyRevealBanner } from '../../components/dashboard/ApiKeyRevealBanner';
+import { ApiKeyCard } from '../../components/dashboard/ApiKeyCard';
+import { ApiQuickstartDocs } from '../../components/dashboard/ApiQuickstartDocs';
 import { createAuthenticatedTRPCClient } from '../../lib/trpc';
-import styles from './api-keys.module.css';
+import type { ApiKeyInfo } from '../../types';
 
 // Public API URL is derived from NEXT_PUBLIC_TRPC_URL so the worker origin stays in one place
 const workerBaseUrl = (process.env.NEXT_PUBLIC_TRPC_URL ?? '').replace(/\/trpc$/, '');
 const eventsApiUrl = `${workerBaseUrl}/api/v1/events`;
-
-type ApiKeyInfo = {
-  keyPrefix: string;
-  createdAt: number;
-};
 
 export default function ApiKeysPage() {
   const { getToken } = useAuth();
@@ -111,174 +110,46 @@ export default function ApiKeysPage() {
         <title>API Keys — Dashboard</title>
       </Head>
 
-      <div className={styles.page}>
-        <header className={styles.header}>
-          <OrganizationSwitcher
-            hidePersonal={true}
-            appearance={{
-              elements: {
-                organizationSwitcherPopoverActionButton__createOrganization: {
-                  display: 'none',
-                },
-              },
-            }}
-          />
-          <UserButton />
-        </header>
+      <div className="max-w-[800px] mx-auto px-6 py-8 font-sans text-gray-900">
+        <AppHeader />
 
-        <Link href="/dashboard" className={styles.backLink}>
+        <Link href="/dashboard" className="inline-flex items-center gap-2 text-gray-600 hover:text-gray-900 no-underline text-[0.9rem] font-medium mb-6 transition-colors">
           ← Back to Dashboard
         </Link>
 
-        <h1 className={styles.title}>Public API Keys</h1>
-        <p className={styles.subtitle}>
+        <h1 className="text-[2rem] font-bold tracking-tight mb-2">Public API Keys</h1>
+        <p className="text-gray-500 text-base mb-8">
           Manage organisation-scoped API keys for embedding event listings on external websites and integrations.
         </p>
 
-        {error && <div className={styles.errorBanner}>{error}</div>}
-        {actionError && <div className={styles.errorBanner}>{actionError}</div>}
+        {error && <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded-md mb-4 text-[0.9rem]">{error}</div>}
+        {actionError && <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded-md mb-4 text-[0.9rem]">{actionError}</div>}
 
         {/* Reveal-Once Banner */}
         {revealedKey && (
-          <div className={styles.revealBanner}>
-            <div className={styles.revealTitle}>
-              ⚠️ Save your API Key Now
-            </div>
-            <p className={styles.revealWarning}>
-              This is the only time the full API key will be displayed. Copy it and store it in a secure location.
-            </p>
-            <div className={styles.secretBox}>
-              <span className={styles.secretKey}>{revealedKey}</span>
-              <button
-                type="button"
-                onClick={handleCopy}
-                className={styles.copyButton}
-                id="copy-api-key-button"
-              >
-                {copied ? '✓ Copied' : 'Copy Key'}
-              </button>
-            </div>
-          </div>
+          <ApiKeyRevealBanner
+            revealedKey={revealedKey}
+            copied={copied}
+            onCopy={() => { void handleCopy(); }}
+          />
         )}
 
         {/* Key Status Card */}
-        <div className={styles.card}>
-          <div className={styles.statusHeader}>
-            <div className={styles.statusTitle}>Active API Key</div>
-            {loading ? (
-              <span className={styles.badgeNone}>Loading…</span>
-            ) : keyInfo ? (
-              <span className={styles.badgeActive}>● Active</span>
-            ) : (
-              <span className={styles.badgeNone}>No Active Key</span>
-            )}
-          </div>
-
-          {!loading && keyInfo ? (
-            <div>
-              <div className={styles.keyDetails}>
-                <span className={styles.keyLabel}>Key Prefix:</span>
-                <span className={styles.keyValue}>{keyInfo.keyPrefix}</span>
-
-                <span className={styles.keyLabel}>Created:</span>
-                <span className={styles.keyValue}>
-                  {new Date(keyInfo.createdAt).toLocaleDateString('en-GB', {
-                    year: 'numeric',
-                    month: 'short',
-                    day: 'numeric',
-                    hour: '2-digit',
-                    minute: '2-digit',
-                  })}
-                </span>
-              </div>
-
-              <div className={styles.actionsRow}>
-                <button
-                  type="button"
-                  onClick={() => handleGenerateOrRotate(true)}
-                  disabled={actionLoading}
-                  className={styles.secondaryButton}
-                  id="rotate-api-key-button"
-                >
-                  {actionLoading ? 'Rotating…' : 'Rotate API Key'}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setShowRevokeConfirm(true)}
-                  disabled={actionLoading}
-                  className={styles.dangerButton}
-                  id="revoke-api-key-button"
-                >
-                  Revoke Key
-                </button>
-              </div>
-
-              {showRevokeConfirm && (
-                <div className={styles.confirmDialog}>
-                  <div className={styles.confirmTitle}>Revoke API Key?</div>
-                  <p className={styles.confirmText}>
-                    Any external website or integration currently using this API key will immediately stop working. This action cannot be undone.
-                  </p>
-                  <div className={styles.actionsRow}>
-                    <button
-                      type="button"
-                      onClick={handleRevoke}
-                      disabled={actionLoading}
-                      className={styles.dangerButton}
-                      id="confirm-revoke-button"
-                    >
-                      {actionLoading ? 'Revoking…' : 'Yes, Revoke Key'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setShowRevokeConfirm(false)}
-                      disabled={actionLoading}
-                      className={styles.secondaryButton}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          ) : !loading && (
-            <div>
-              <p style={{ color: '#4b5563', marginBottom: '1.5rem', fontSize: '0.95rem' }}>
-                Your organisation does not have an active API key. Generate one to access the public read-only events API.
-              </p>
-              <button
-                type="button"
-                onClick={() => handleGenerateOrRotate(false)}
-                disabled={actionLoading}
-                className={styles.primaryButton}
-                id="generate-api-key-button"
-              >
-                {actionLoading ? 'Generating…' : 'Generate API Key'}
-              </button>
-            </div>
-          )}
-        </div>
+        <ApiKeyCard
+          loading={loading}
+          keyInfo={keyInfo}
+          actionLoading={actionLoading}
+          showRevokeConfirm={showRevokeConfirm}
+          onGenerateOrRotate={(isRotate) => { void handleGenerateOrRotate(isRotate); }}
+          onRevoke={() => { void handleRevoke(); }}
+          onShowRevokeConfirm={setShowRevokeConfirm}
+        />
 
         {/* Integration Documentation Card */}
-        <div className={styles.card}>
-          <div className={styles.docsTitle}>API Quickstart</div>
-          <p style={{ color: '#4b5563', fontSize: '0.9rem', marginBottom: '1rem' }}>
-            Use your API key as a Bearer token in the <code>Authorization</code> header. All requests return JSON scoped exclusively to {organization?.name ?? 'your organisation'}.
-          </p>
-
-          <h4 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '0.5rem' }}>List Upcoming Events</h4>
-          <pre className={styles.codeSnippet}>
-{`curl -X GET "${eventsApiUrl}?limit=50&offset=0" \\
-  -H "Authorization: Bearer <your_api_key>"`}
-          </pre>
-
-          <h4 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '0.5rem', marginTop: '1rem' }}>Get Single Event (With Live Seats)</h4>
-          <pre className={styles.codeSnippet}>
-{`curl -X GET "${eventsApiUrl}/<event_id>" \\
-  -H "Authorization: Bearer <your_api_key>"`}
-          </pre>
-        </div>
+        <ApiQuickstartDocs
+          eventsApiUrl={eventsApiUrl}
+          organizationName={organization?.name ?? 'your organisation'}
+        />
       </div>
     </RequireOrgAuth>
   );

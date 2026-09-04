@@ -1,19 +1,10 @@
 import Head from 'next/head';
-import Link from 'next/link';
 import { createTRPCClient, httpBatchLink } from '@trpc/client';
 import { getCloudflareContext } from '@opennextjs/cloudflare';
 import type { AppRouter } from '@event-booking/worker/src/router';
 import type { GetServerSideProps, InferGetServerSidePropsType } from 'next';
-import styles from './home.module.css';
-
-interface PublicEvent {
-  id: string;
-  name: string;
-  date: number;
-  totalSeats: number;
-  pricePerSeat: number;
-  coverImageUrl: string | null;
-}
+import type { PublicEvent } from '../types';
+import { EventCard } from '../components/events/EventCard';
 
 // ---------------------------------------------------------------------------
 // getServerSideProps — fetch upcoming events server-side (no auth needed)
@@ -39,52 +30,25 @@ export default function HomePage({
   events,
 }: InferGetServerSidePropsType<typeof getServerSideProps>) {
   return (
-    <div className={styles.page}>
+    <div className="max-w-[900px] mx-auto px-6 py-8 font-sans">
       <Head>
         <title>Event Booking Platform</title>
         <meta name="description" content="Browse and book upcoming events." />
       </Head>
 
-      <header className={styles.header}>
-        <h1 className={styles.title}>Upcoming Events</h1>
+      <header className="mb-8 border-b border-[#e2e2e2] pb-4">
+        <h1 className="text-[1.75rem] font-bold text-[#222] m-0">Upcoming Events</h1>
       </header>
 
       {events.length === 0 ? (
-        <p className={styles.empty}>No upcoming events at the moment. Check back soon!</p>
+        <p className="p-8 border border-dashed border-[#ccc] rounded-lg text-center text-[#666] mt-4">
+          No upcoming events at the moment. Check back soon!
+        </p>
       ) : (
-        <ul className={styles.grid}>
-          {events.map((event) => {
-            const formattedDate = new Date(event.date).toLocaleDateString('en-GB', {
-              weekday: 'short',
-              year: 'numeric',
-              month: 'short',
-              day: 'numeric',
-              hour: '2-digit',
-  minute: '2-digit',
-            });
-            const formattedPrice = `£${(event.pricePerSeat / 100).toFixed(2)} per seat`;
-
-            return (
-              <li key={event.id} className={styles.card}>
-                <Link href={`/events/${event.id}`} className={styles.cardLink}>
-                  {event.coverImageUrl ? (
-                    <img
-                      src={event.coverImageUrl}
-                      alt={event.name}
-                      className={styles.cardImage}
-                    />
-                  ) : (
-                    <div className={styles.cardImagePlaceholder} aria-hidden="true" />
-                  )}
-                  <div className={styles.cardBody}>
-                    <p className={styles.cardName}>{event.name}</p>
-                    <p className={styles.cardMeta}>{formattedDate}</p>
-                    <p className={styles.cardPrice}>{formattedPrice}</p>
-                  </div>
-                </Link>
-              </li>
-            );
-          })}
+        <ul className="list-none m-0 p-0 grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-5">
+          {events.map((event) => (
+            <EventCard key={event.id} event={event} />
+          ))}
         </ul>
       )}
     </div>
