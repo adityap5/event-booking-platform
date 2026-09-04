@@ -30,6 +30,24 @@ packages/
 
 Splitting `web-app` and `worker` (rather than a single Next.js app with API routes) mirrors how the team's production system is structured, and gives a hard boundary: the worker is the only thing with database credentials, R2/KV/DO bindings, and Stripe/Clerk secret keys. The frontend is a pure client of the worker's tRPC API. This makes "does the frontend leak a secret or bypass an authorisation check" a structural question (can you find a binding import in `web-app`? no) rather than a code-review-by-vigilance question.
 
+```mermaid
+flowchart LR
+    Browser["Browser Client<br/>(Next.js Pages)"]
+    Worker["Cloudflare Worker<br/>(tRPC & REST API)"]
+    D1[("D1 Relational DB<br/>(Drizzle ORM)")]
+    DO["Durable Objects<br/>(SeatLedger & RateLimiter)"]
+    R2[("R2 Object Storage<br/>(Covers & Ticket PDFs)")]
+    KV[("KV Cache<br/>(Event Metadata)")]
+
+    Browser -->|"HTTPS / WebSocket"| Worker
+    Worker -->|"D1 Binding"| D1
+    Worker -->|"RPC / fetch"| DO
+    Worker -->|"R2 Binding"| R2
+    Worker -->|"KV Binding"| KV
+```
+
+> *Note: For the full multi-service topology diagram including external platforms (Stripe, Clerk, Axiom, Sentry), see [ARCHITECTURE_DIAGRAM.md](file:///home/adityapippal/projects/event-booking-platform/ARCHITECTURE_DIAGRAM.md).*
+
 ---
 
 ## 2. The Seat Ledger — Durable Object Model
@@ -71,6 +89,32 @@ The DO currently uses raw prepared SQL statements against `this.ctx.storage.sql`
 - This is the most heavily tested, most concurrency-sensitive file in the repo. Swapping its storage layer on the final day, without time for full regression testing, was judged too risky relative to the benefit of stack consistency.
 
 **Decision:** defer to a follow-up branch, done together with the file's structural modularisation (see Point 10), rather than rushed alongside feature work.
+
+### Hold lifecycle state machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: reserveSeat()
+    pending --> confirmed: confirmSeat() (Stripe webhook)
+    pending --> released: releaseSeat() (alarm expiry or explicit releaseHold)
+    confirmed --> refunded: refundSeat() (Stripe refund)
+
+    released --> [*]
+    refunded --> [*]
+
+    note right of confirmed
+        Storage Pruning Cutoff:
+        Permanently deleted from SQLite
+        after 7-day retention window
+        (pruneConfirmedHolds via DO alarm)
+    end note
+
+    note left of released
+        Guard: confirmed cannot
+        transition to released
+        (enforced in releaseSeat)
+    end note
+```
 
 ### 2a. Confirming a Hold — Webhook-Only, One Call Site (Day 1, Phase 2)
 
@@ -158,6 +202,32 @@ Browsers cannot set custom headers on a WebSocket upgrade request, so the Clerk 
 3. The client opens the WebSocket with that ticket as the *only* URL parameter — the ticket itself is single-use and short-lived, so even if it appears in a log, it's already worthless by the time anyone could misuse it.
 4. The **same DO** (`fetch()` handler) validates and deletes the ticket **before** accepting the WebSocket upgrade — rejecting with 401 if missing, expired, or already used (previously redeemed).
 5. Resolved identity (`userId`) is stored in the WebSocket connection's **attachment** (`this.ctx.acceptWebSocket(server, [identity.userId])`) — not read from message payloads. The attachment survives DO hibernation, which is exactly why it's the right home for identity: a client-supplied `userId` inside a later message is never trusted.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Browser Client
+    participant Worker as Cloudflare Worker (tRPC / HTTP)
+    participant DO as SeatLedger Durable Object
+
+    Client->>Worker: createSocketTicket(eventId) [tRPC with Bearer JWT]
+    Note over Worker: Verify JWT & rate limit (10/60s)<br/>Ensure DO initialized
+    Worker->>DO: stub.mintTicket(userId, orgId, eventId)
+    Note over DO: Insert ticket into socket_tickets<br/>(30s TTL, single-use)
+    DO-->>Worker: ticket UUID
+    Worker-->>Client: { ticket }
+
+    Client->>Worker: WebSocket Upgrade: GET /ws?eventId=...&ticket=...
+    Note over Worker: handleWebSocketUpgrade validates Origin (CSWSH)
+    Worker->>DO: stub.fetch(request)
+    Note over DO: redeemTicket: validate & atomically DELETE<br/>ctx.acceptWebSocket(server, [userId])
+    DO-->>Client: 101 Switching Protocols
+    DO-->>Client: Push initial state: {"type":"seat_count","available":N}
+
+    opt On Seat State Mutation (reserve, confirm, release, refund)
+        DO-->>Client: broadcastSeatCount(): {"type":"seat_count","available":N}
+    end
+```
 
 **Why the DO, not KV, for ticket storage:** the DO is single-threaded, so "check ticket exists, then delete it" is genuinely atomic — two simultaneous connection attempts with the same ticket cannot both succeed. KV has no atomic check-and-delete, and writes propagate across Cloudflare's regions with delay — a ticket minted in one region might not yet be visible when redeemed against another, producing intermittent, hard-to-diagnose rejections that look like network faults, not logic bugs.
 
@@ -272,6 +342,77 @@ organisation_api_keys
   keyPrefix              — text (e.g. 'eb_live_a1b2c3d4' for display/identification)
   createdAt
   revokedAt              — nullable timestamp (partial unique index on organisationId WHERE revoked_at IS NULL structurally enforces at most one active key per org)
+```
+
+### Entity-Relationship Diagram
+
+```mermaid
+erDiagram
+    organisations ||--o{ events : "hosts"
+    organisations ||--o{ organisation_api_keys : "owns"
+    events ||--o{ bookings : "receives"
+    attendees ||--o{ bookings : "makes"
+    events ||..o{ audit_log : "references (non-FK)"
+
+    organisations {
+        text id PK
+        text name
+        text owner_id
+        text stripe_customer_id
+        text stripe_subscription_id
+        text subscription_status
+        integer created_at
+    }
+
+    events {
+        text id PK
+        text organisation_id FK
+        text name
+        text description
+        integer date
+        integer total_seats
+        integer price_per_seat
+        text cover_image_url
+        integer created_at
+    }
+
+    attendees {
+        text id PK
+        text user_id
+        text email
+        text name
+    }
+
+    bookings {
+        text id PK
+        text event_id FK
+        text attendee_id FK
+        text status
+        text hold_id
+        integer seat_count
+        text stripe_payment_intent_id
+        integer created_at
+    }
+
+    organisation_api_keys {
+        text id PK
+        text organisation_id FK
+        text key_hash
+        text key_prefix
+        integer created_at
+        integer revoked_at
+    }
+
+    audit_log {
+        text id PK
+        text event_type
+        text hold_id
+        text booking_event_id
+        text user_id
+        text org_id
+        text detail
+        integer created_at
+    }
 ```
 
 **DO/D1 boundary for seat state:** D1's `bookings` table is the durable record of what was actually paid for and confirmed. The DO's own SQLite `reservations` table is the live, serialised source of truth for "is this seat available right now" — it exists only inside the DO instance for that event, is not queried directly by any other part of the system, and a pending hold in the DO does not yet have a corresponding bookings row in D1 (that row is only written by `confirmBookingFromPayment`, called exclusively from the Stripe webhook — see §2a). There is no client-triggered confirm path; confirmation happens server-side only, driven by a verified Stripe payment event.
